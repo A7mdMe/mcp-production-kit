@@ -1,0 +1,18 @@
+# smithery.yaml configuration for MCP Production Kit
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    properties:
+      NODE_ENV:
+        type: string
+        default: "production"
+        description: "Node execution environment (production/development)"
+  commandFunction: |-
+    (config) => ({
+      command: 'node',
+      args: ['dist/index.js'],
+      env: {
+        NODE_ENV: config.NODE_ENV || 'production'
+      }
+    })
