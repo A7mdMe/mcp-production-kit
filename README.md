@@ -6,6 +6,7 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0%2B-blue.svg)](https://www.typescriptlang.org/)
 [![MCP Spec](https://img.shields.io/badge/MCP%20Spec-2024--11--05-green.svg)](https://modelcontextprotocol.io/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![A7mdMe/mcp-production-kit MCP server](https://glama.ai/mcp/servers/A7mdMe/mcp-production-kit/badges/score.svg)](https://glama.ai/mcp/servers/A7mdMe/mcp-production-kit)
 
 ---
 
@@ -111,7 +112,8 @@ For production cloud deployments and enterprise teams, the **Pro Pack** provides
 * **PostgreSQL / Supabase Connector:** Read-only schema introspection and parameterized SQL queries with mutation defenses.
 * **Production Dockerfile & Compose:** Multi-stage distroless container with non-root security and healthcheck polling.
 
-👉 **[Get the Pro Pack on Whop / Gumroad](https://whop.com)**
+👉 **[Get Pro Pack ($19.00 USD) — Instant Checkout on Whop](https://whop.com/checkout/plan_eiKHeRpooY3yc)**  
+*(Also viewable at [Whop Storefront](https://whop.com/github-67b8/mcp-production-kit-pro-pack))*
 
 ---
 
