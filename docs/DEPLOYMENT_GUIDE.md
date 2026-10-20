@@ -89,8 +89,8 @@ Endpoints available:
 
 *Available via the [Commercial Pro Pack](https://whop.com/checkout/plan_eiKHeRpooY3yc)*
 
-For global, low-latency deployments with zero cold starts, Cloudflare Workers provides an optimal edge architecture:
-- Sub-50ms global latency without managing VM instances.
+For low-latency edge deployments without managing dedicated VM instances, Cloudflare Workers provides an optimal edge architecture:
+- Low-latency edge execution using Cloudflare Workers.
 - Bearer token authentication via Worker secrets (`MCP_AUTH_TOKEN`).
 - Native SSE response streaming utilizing standard Web Streams API.
 
@@ -99,5 +99,5 @@ For global, low-latency deployments with zero cold starts, Cloudflare Workers pr
 ## 4. Production Security Checklist
 
 1. **SSRF Guarding:** Never allow tools to make arbitrary outbound network requests to internal networks (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `127.0.0.1`, or `169.254.169.254`).
-2. **Read-Only Database Permissions:** Grant minimal database roles (`SELECT` only) when providing SQL tools, with AST-level parsing to block destructive DDL and stacked queries.
+2. **Read-Only Database Permissions:** Grant minimal database roles (`SELECT` only) when providing SQL tools, with comment-stripping and keyword validation to block destructive DDL and stacked queries.
 3. **Structured Stderr Logging:** Always route operational logs and errors to `stderr` with automated credential masking.
