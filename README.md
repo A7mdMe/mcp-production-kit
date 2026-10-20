@@ -22,8 +22,8 @@
 | **State Store Tool** | `agent_memory_store` (Namespaced KV + TTL) | Included |
 | **Logging Pipeline** | Zero-leak stderr streaming | Zero-leak stderr streaming |
 | **Glama Registry Score** | **Grade B Verified** | **Grade B Verified** |
-| **Edge Serverless Deployment** | - | **Cloudflare Workers template (zero-cold-start)** |
-| **Database Connector** | - | **PostgreSQL / Supabase with AST injection guard** |
+| **Edge Serverless Deployment** | - | **Cloudflare Workers template (global edge network)** |
+| **Database Connector** | - | **PostgreSQL / Supabase with token & keyword mutation guards** |
 | **Multi-Container Orchestration** | Standard Dockerfile | **Production Docker Compose (Fly.io / Railway / AWS)** |
 | **Commercial Distribution** | Free under MIT License | **Commercial License + Instant ZIP Download** |
 
@@ -134,7 +134,7 @@ docker run -p 3000:3000 -e TRANSPORT=sse mcp-production-kit
 
 For production cloud deployments and enterprise teams, the **Pro Pack** provides ready-to-deploy extensions:
 * **Cloudflare Workers Serverless Template:** Low-latency edge deployment with Bearer Token auth and native streaming.
-* **PostgreSQL / Supabase Connector:** Read-only schema introspection and parameterized SQL queries with AST mutation defenses.
+* **PostgreSQL / Supabase Connector:** Read-only schema introspection and parameterized SQL queries with comment-stripping and mutation keyword defenses.
 * **Production Docker Compose:** Multi-stage container with non-root security, healthcheck polling, and reverse proxy setup.
 
 **[Get Pro Pack ($19.00 USD) — Instant Checkout on Whop](https://whop.com/checkout/plan_eiKHeRpooY3yc)**  
