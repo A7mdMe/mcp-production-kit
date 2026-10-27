@@ -21,10 +21,10 @@
 | **Security Tool** | `secure_http_fetch` (SSRF Guard) | Included |
 | **State Store Tool** | `agent_memory_store` (Namespaced KV + TTL) | Included |
 | **Logging Pipeline** | Zero-leak stderr streaming | Zero-leak stderr streaming |
-| **Glama Registry Score** | **Grade B Verified** | **Grade B Verified** |
+| **Glama Registry Listing** | Listed on Glama Registry | Listed on Glama Registry |
 | **Edge Serverless Deployment** | - | **Cloudflare Workers template (global edge network)** |
 | **Database Connector** | - | **PostgreSQL / Supabase with token & keyword mutation guards** |
-| **Multi-Container Orchestration** | Standard Dockerfile | **Production Docker Compose (Fly.io / Railway / AWS)** |
+| **Container Support** | Standard Dockerfile | **Production Docker Compose (Fly.io / Railway / AWS)** |
 | **Commercial Distribution** | Free under MIT License | **Commercial License + Instant ZIP Download** |
 
 ---
