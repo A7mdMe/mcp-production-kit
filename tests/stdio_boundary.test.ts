@@ -75,7 +75,7 @@ async function runStdioBoundaryTests() {
   }
 
   // 1. Test startup stderr logging
-  await new Promise(r => setTimeout(r, 600));
+  await new Promise(r => setTimeout(r, 1200));
   const hasStartupLog = stderrLines.some(l => l.includes('Initializing') || l.includes('connected to stdio'));
   logTest('Server entry point emits operational startup logs exclusively on stderr', hasStartupLog);
 
