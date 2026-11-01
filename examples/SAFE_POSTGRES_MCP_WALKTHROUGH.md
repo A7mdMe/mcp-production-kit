@@ -62,11 +62,12 @@ A robust database tool must combine **database least privilege** with **applicat
 |                                                             |
 |  - Role: read_only_agent                                    |
 |  - Permissions: GRANT SELECT ON ALL TABLES                  |
+|  - Runtime: BEGIN TRANSACTION READ ONLY                     |
 |  - statement_timeout = '5000' (5s kill-switch)              |
 +-------------------------------------------------------------+
 ```
 
-> **Security Note:** Application-level token & regex sanitization is an operational guardrail, not a full SQL AST compiler. It must always be paired with PostgreSQL least-privilege read-only roles (`GRANT SELECT`).
+> **Security Note:** Application-level token & regex sanitization is an operational guardrail, not a full SQL AST compiler. It must always be paired with PostgreSQL least-privilege read-only roles (`GRANT SELECT`) and runtime read-only transaction enforcement (`BEGIN TRANSACTION READ ONLY` or `SET default_transaction_read_only = on`) to deterministically block side-effecting user-defined functions (UDFs) at the storage engine level.
 
 ---
 
