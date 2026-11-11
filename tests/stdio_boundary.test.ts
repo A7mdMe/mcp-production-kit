@@ -74,9 +74,17 @@ async function runStdioBoundaryTests() {
     child.stdin.write(JSON.stringify(msg) + '\n');
   }
 
+  async function waitFor(condition: () => boolean, timeoutMs = 4000, stepMs = 50): Promise<boolean> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (condition()) return true;
+      await new Promise(r => setTimeout(r, stepMs));
+    }
+    return condition();
+  }
+
   // 1. Test startup stderr logging
-  await new Promise(r => setTimeout(r, 1200));
-  const hasStartupLog = stderrLines.some(l => l.includes('Initializing') || l.includes('connected to stdio'));
+  const hasStartupLog = await waitFor(() => stderrLines.some(l => l.includes('Initializing') || l.includes('connected to stdio')));
   logTest('Server entry point emits operational startup logs exclusively on stderr', hasStartupLog);
 
   // 2. Test initialize handshake on stdout
@@ -91,10 +99,11 @@ async function runStdioBoundaryTests() {
     }
   });
 
-  await new Promise(r => setTimeout(r, 600));
-  const initRes = stdoutFrames.find(f => f.id === 1);
-  const initValid = initRes && !initRes._parseError && initRes.result?.protocolVersion === '2024-11-05';
-  logTest('Handshake: "initialize" response delivered as clean JSON-RPC 2.0 on stdout', Boolean(initValid));
+  const initValid = await waitFor(() => {
+    const initRes = stdoutFrames.find(f => f.id === 1);
+    return Boolean(initRes && !initRes._parseError && initRes.result?.protocolVersion === '2024-11-05');
+  });
+  logTest('Handshake: "initialize" response delivered as clean JSON-RPC 2.0 on stdout', initValid);
 
   // 3. Test initialized notification
   sendMsg({
@@ -111,10 +120,11 @@ async function runStdioBoundaryTests() {
     params: {}
   });
 
-  await new Promise(r => setTimeout(r, 600));
-  const toolsRes = stdoutFrames.find(f => f.id === 2);
-  const toolsValid = toolsRes && !toolsRes._parseError && Array.isArray(toolsRes.result?.tools);
-  logTest('Tool Discovery: "tools/list" delivers valid array on stdout without log pollution', Boolean(toolsValid));
+  const toolsValid = await waitFor(() => {
+    const toolsRes = stdoutFrames.find(f => f.id === 2);
+    return Boolean(toolsRes && !toolsRes._parseError && Array.isArray(toolsRes.result?.tools));
+  });
+  logTest('Tool Discovery: "tools/list" delivers valid array on stdout without log pollution', toolsValid);
 
   // 5. Test tool execution error handling (SSRF trigger)
   sendMsg({
@@ -129,10 +139,11 @@ async function runStdioBoundaryTests() {
     }
   });
 
-  await new Promise(r => setTimeout(r, 800));
-  const errorRes = stdoutFrames.find(f => f.id === 3);
-  const errorHandled = errorRes && (errorRes.result?.isError === true || errorRes.error !== undefined);
-  logTest('Tool Error Boundary: Security block returns structured JSON-RPC response on stdout', Boolean(errorHandled));
+  const errorHandled = await waitFor(() => {
+    const errorRes = stdoutFrames.find(f => f.id === 3);
+    return Boolean(errorRes && (errorRes.result?.isError === true || errorRes.error !== undefined));
+  });
+  logTest('Tool Error Boundary: Security block returns structured JSON-RPC response on stdout', errorHandled);
 
   // 6. Verify zero corrupt stdout frames
   const corruptedFrames = stdoutFrames.filter(f => f._parseError);
