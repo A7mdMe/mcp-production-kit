@@ -12,6 +12,14 @@ import {
   enforceReadOnlyConnectionUri,
   SQLITE_SCHEMA_INTROSPECTION_QUERY
 } from '../pro_pack/sqlite_connector.ts';
+import {
+  McpCancellationManager,
+  createCancellationJsonRpcError,
+  createTimeoutJsonRpcError,
+  CancelNotificationSchema,
+  MCP_ERROR_REQUEST_CANCELLED,
+  MCP_ERROR_TIMEOUT
+} from '../pro_pack/cancellation_manager.ts';
 
 let passed = 0;
 let failed = 0;
@@ -280,6 +288,114 @@ async function runProPackTestSuite() {
   await test('Exports valid sqlite_master schema introspection query', () => {
     assert(SQLITE_SCHEMA_INTROSPECTION_QUERY.includes('FROM sqlite_master'));
     assert(SQLITE_SCHEMA_INTROSPECTION_QUERY.includes("name NOT LIKE 'sqlite_%'"));
+  });
+
+  // 5. Request Cancellation & Execution Timeout Tests
+  console.log('\n[Module: Request Cancellation & Deadline Timeout Manager]');
+
+  await test('Registers in-flight request and returns un-aborted AbortSignal', () => {
+    const manager = new McpCancellationManager();
+    const signal = manager.registerRequest('req-1', 5000);
+    assert.strictEqual(signal.aborted, false);
+    assert.strictEqual(manager.isInFlight('req-1'), true);
+    assert.strictEqual(manager.getInFlightCount(), 1);
+    manager.cleanup('req-1');
+    assert.strictEqual(manager.isInFlight('req-1'), false);
+    assert.strictEqual(manager.getInFlightCount(), 0);
+  });
+
+  await test('handleCancelNotification aborts active signal and cleans up mapping', () => {
+    const manager = new McpCancellationManager();
+    const signal = manager.registerRequest('req-2', 10000);
+    const handled = manager.handleCancelNotification({ requestId: 'req-2', reason: 'User clicked Stop' });
+    assert.strictEqual(handled, true);
+    assert.strictEqual(signal.aborted, true);
+    assert.strictEqual(signal.reason?.message, 'User clicked Stop');
+    assert.strictEqual(manager.isInFlight('req-2'), false);
+  });
+
+  await test('handleCancelNotification returns false for unknown or completed request', () => {
+    const manager = new McpCancellationManager();
+    const handled = manager.handleCancelNotification({ requestId: 'non-existent' });
+    assert.strictEqual(handled, false);
+  });
+
+  await test('executeWithGuards completes normally when tool finishes before deadline', async () => {
+    const manager = new McpCancellationManager();
+    const res = await manager.executeWithGuards('req-3', 2000, async (signal) => {
+      assert.strictEqual(signal.aborted, false);
+      return { status: 'completed', records: 42 };
+    });
+    assert.strictEqual(res.success, true);
+    if (res.success) {
+      assert.strictEqual(res.data.records, 42);
+    }
+    assert.strictEqual(manager.getInFlightCount(), 0);
+  });
+
+  await test('executeWithGuards returns -32800 error when request is cancelled during execution', async () => {
+    const manager = new McpCancellationManager();
+    const executionPromise = manager.executeWithGuards('req-4', 5000, async (signal) => {
+      return new Promise((resolve, reject) => {
+        signal.addEventListener('abort', () => {
+          reject(signal.reason);
+        });
+      });
+    });
+
+    // Simulate client sending notifications/cancelled after 50ms
+    setTimeout(() => {
+      manager.handleCancelNotification({ requestId: 'req-4', reason: 'Client disconnected' });
+    }, 50);
+
+    const res = await executionPromise;
+    assert.strictEqual(res.success, false);
+    if (!res.success) {
+      assert.strictEqual(res.errorResponse.error.code, MCP_ERROR_REQUEST_CANCELLED);
+      assert.strictEqual(res.errorResponse.id, 'req-4');
+      assert(res.errorResponse.error.message.includes('Client disconnected'));
+      assert.strictEqual(res.errorResponse.error.data?.cancelled, true);
+    }
+    assert.strictEqual(manager.getInFlightCount(), 0);
+  });
+
+  await test('executeWithGuards returns -32000 error when execution exceeds deadline timeout', async () => {
+    const manager = new McpCancellationManager();
+    const res = await manager.executeWithGuards('req-5', 100, async (signal) => {
+      return new Promise((resolve, reject) => {
+        signal.addEventListener('abort', () => {
+          reject(signal.reason);
+        });
+        setTimeout(resolve, 500); // 500ms > 100ms timeout
+      });
+    });
+
+    assert.strictEqual(res.success, false);
+    if (!res.success) {
+      assert.strictEqual(res.errorResponse.error.code, MCP_ERROR_TIMEOUT);
+      assert.strictEqual(res.errorResponse.id, 'req-5');
+      assert(res.errorResponse.error.message.includes('deadline exceeded'));
+      assert.strictEqual(res.errorResponse.error.data?.timeoutMs, 100);
+    }
+    assert.strictEqual(manager.getInFlightCount(), 0);
+  });
+
+  await test('CancelNotificationSchema validates both string and numeric request IDs', () => {
+    const parsed1 = CancelNotificationSchema.parse({ requestId: 'abc-123', reason: 'abort' });
+    assert.strictEqual(parsed1.requestId, 'abc-123');
+
+    const parsed2 = CancelNotificationSchema.parse({ requestId: 42 });
+    assert.strictEqual(parsed2.requestId, 42);
+    assert.strictEqual(parsed2.reason, undefined);
+  });
+
+  await test('createCancellationJsonRpcError formats standard MCP error with timestamp', () => {
+    const err = createCancellationJsonRpcError(99, 'Custom cancel');
+    assert.strictEqual(err.jsonrpc, '2.0');
+    assert.strictEqual(err.id, 99);
+    assert.strictEqual(err.error.code, -32800);
+    assert.strictEqual(err.error.message, 'Custom cancel');
+    assert.strictEqual(err.error.data?.cancelled, true);
   });
 
   // Summary
