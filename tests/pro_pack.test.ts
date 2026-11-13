@@ -7,6 +7,11 @@ import {
   POSTGRES_TOKEN_BUCKET_DDL,
   POSTGRES_ATOMIC_CONSUME_QUERY
 } from '../pro_pack/rate_limiter.ts';
+import {
+  validateReadOnlySqliteQuery,
+  enforceReadOnlyConnectionUri,
+  SQLITE_SCHEMA_INTROSPECTION_QUERY
+} from '../pro_pack/sqlite_connector.ts';
 
 let passed = 0;
 let failed = 0;
@@ -204,6 +209,77 @@ async function runProPackTestSuite() {
     assert(POSTGRES_TOKEN_BUCKET_DDL.includes('CREATE TABLE IF NOT EXISTS mcp_rate_limits'));
     assert(POSTGRES_ATOMIC_CONSUME_QUERY.includes('WITH current_state AS'));
     assert(POSTGRES_ATOMIC_CONSUME_QUERY.includes('ON CONFLICT (agent_id, tool_name) DO UPDATE'));
+  });
+
+  // 4. SQLite Read-Only Guardrail & Schema Introspection Tests
+  console.log('\n[Module: Hardened SQLite Read-Only Guardrails & Schema Introspection]');
+
+  await test('Allows safe standard SQLite SELECT queries', () => {
+    const res = validateReadOnlySqliteQuery('SELECT id, name, created_at FROM items WHERE active = 1');
+    assert.strictEqual(res.safe, true);
+  });
+
+  await test('Allows SELECT queries with string literals containing prohibited words', () => {
+    const res = validateReadOnlySqliteQuery("SELECT * FROM attachments WHERE filename = 'ATTACH_FILE.pdf' AND status = 'DETACHED'");
+    assert.strictEqual(res.safe, true);
+  });
+
+  await test('Allows safe read-only Common Table Expressions (WITH ... SELECT)', () => {
+    const res = validateReadOnlySqliteQuery('WITH active_items AS (SELECT id, name FROM items WHERE active = 1) SELECT * FROM active_items');
+    assert.strictEqual(res.safe, true);
+  });
+
+  await test('Blocks direct SQLite DELETE statements', () => {
+    const res = validateReadOnlySqliteQuery('DELETE FROM items WHERE id = 10');
+    assert.strictEqual(res.safe, false);
+    assert(res.reason?.includes("Query must start with 'SELECT' or 'WITH'") || res.reason?.includes('DELETE'));
+  });
+
+  await test('Blocks direct SQLite DROP TABLE statements', () => {
+    const res = validateReadOnlySqliteQuery('DROP TABLE items');
+    assert.strictEqual(res.safe, false);
+    assert(res.reason?.includes("Query must start with 'SELECT' or 'WITH'") || res.reason?.includes('DROP'));
+  });
+
+  await test('Blocks stacked SQL injection attacks with semicolons in SQLite', () => {
+    const res = validateReadOnlySqliteQuery('SELECT * FROM items; DROP TABLE items');
+    assert.strictEqual(res.safe, false);
+    assert(res.reason?.includes('Multiple SQL statements detected'));
+  });
+
+  await test('Blocks SQLite ATTACH DATABASE vectors', () => {
+    const res = validateReadOnlySqliteQuery("SELECT * FROM items; ATTACH DATABASE 'malicious.db' AS evil");
+    assert.strictEqual(res.safe, false);
+  });
+
+  await test('Blocks SQLite PRAGMA execution vectors', () => {
+    const res = validateReadOnlySqliteQuery('PRAGMA writable_schema = ON');
+    assert.strictEqual(res.safe, false);
+    assert(res.reason?.includes("Query must start with 'SELECT' or 'WITH'") || res.reason?.includes('PRAGMA'));
+  });
+
+  await test('Blocks SQLite comment-wrapped evasion attempts (-- bypass \\n DROP TABLE)', () => {
+    const res = validateReadOnlySqliteQuery('-- bypass check \n DROP TABLE secrets');
+    assert.strictEqual(res.safe, false);
+  });
+
+  await test('Enforces ?mode=ro read-only mode on SQLite connection URIs', () => {
+    const uri1 = enforceReadOnlyConnectionUri('local.db');
+    assert.strictEqual(uri1, 'file:local.db?mode=ro');
+
+    const uri2 = enforceReadOnlyConnectionUri('file:data.sqlite');
+    assert.strictEqual(uri2, 'file:data.sqlite?mode=ro');
+
+    const uri3 = enforceReadOnlyConnectionUri('file:data.sqlite?mode=rwc');
+    assert.strictEqual(uri3, 'file:data.sqlite?mode=ro');
+
+    const uri4 = enforceReadOnlyConnectionUri('file:data.sqlite?cache=shared');
+    assert.strictEqual(uri4, 'file:data.sqlite?cache=shared&mode=ro');
+  });
+
+  await test('Exports valid sqlite_master schema introspection query', () => {
+    assert(SQLITE_SCHEMA_INTROSPECTION_QUERY.includes('FROM sqlite_master'));
+    assert(SQLITE_SCHEMA_INTROSPECTION_QUERY.includes("name NOT LIKE 'sqlite_%'"));
   });
 
   // Summary
