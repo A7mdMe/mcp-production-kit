@@ -132,13 +132,19 @@ docker run -p 3000:3000 -e TRANSPORT=sse mcp-production-kit
 
 ## Commercial Pro Pack ($19 One-Time)
 
-For production cloud deployments and enterprise teams, the **Pro Pack** provides ready-to-deploy extensions:
-* **Cloudflare Workers Serverless Template:** Low-latency edge deployment with Bearer Token auth and native streaming.
-* **PostgreSQL / Supabase Connector:** Read-only schema introspection and parameterized SQL queries with comment-stripping and mutation keyword defenses.
-* **Production Docker Compose:** Multi-stage container with non-root security, healthcheck polling, and reverse proxy setup.
+For production cloud deployments, multi-agent frameworks, and enterprise teams, the **Pro Pack** provides drop-in, battle-tested extensions with 68 dedicated automated unit tests (82 total across the project):
+
+* **Secret Redaction & Compliance Audit Logger:** Multi-pattern masking of API keys (`sk-`, `ghp_`, `whsec_`), Bearer JWTs, and database passwords in connection URIs; structured immutable NDJSON audit trails strictly on `stderr`.
+* **Deterministic Tool Response Caching & Deduplication:** Canonical JSON argument hashing (SHA-256), monotonic generation tracking preventing stale overwrites, and thundering herd in-flight request coalescing.
+* **RFC 6750 Bearer Authentication & Tool RBAC Guard:** Constant-time token verification (`crypto.timingSafeEqual`) and granular per-tool required scopes with standard JSON-RPC `-32003` (Forbidden) enforcement.
+* **Request Cancellation & Deadline Timeout Manager:** `notifications/cancelled` support, downstream `AbortSignal` I/O propagation, and standardized JSON-RPC `-32800` (Cancelled) and `-32000` (Timeout) responses.
+* **Token Bucket Rate Limiter & Cost Control:** In-memory token bucket + atomic PostgreSQL continuous-refill CTE query preventing runaway LLM retry loops, emitting JSON-RPC `-32029` with retry hints.
+* **Hardened SQLite Read-Only Guardrails:** Connection URI `?mode=ro` enforcement, statement sanitization, blocking of vector operations (`ATTACH`, `DETACH`, `PRAGMA`, `VACUUM`), and `sqlite_master` schema introspection.
+* **PostgreSQL / Supabase Safe Connector:** Read-only parameterized query tool with comment-stripping and 16 mutation keyword defenses.
+* **Cloudflare Workers & Docker Compose:** Serverless edge hosting with streaming SSE, plus unprivileged non-root container deployment.
 
 **[Get Pro Pack ($19.00 USD) — Instant Checkout on Whop](https://whop.com/checkout/plan_eiKHeRpooY3yc)**  
-*(Delivery: Instant download via Whop Files app and customer billing portal upon completion).*
+*(Delivery: Instant download of `mcp-pro-pack-v1.6.0.zip` via Whop Files and customer billing portal upon completion).*
 
 ---
 
