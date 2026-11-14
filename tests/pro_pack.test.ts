@@ -31,6 +31,11 @@ import {
   generateToolCacheKey,
   canonicalJsonStringify
 } from '../pro_pack/tool_cache.ts';
+import {
+  McpAuditLogger,
+  redactSensitiveString,
+  redactSensitiveData
+} from '../pro_pack/audit_logger.ts';
 
 let passed = 0;
 let failed = 0;
@@ -648,6 +653,118 @@ async function runProPackTestSuite() {
     assert.strictEqual(cache.get('tool', { id: 2 }).hit, true);
     assert.strictEqual(cache.get('tool', { id: 3 }).hit, true);
     assert.strictEqual(cache.getStats().evictions, 1);
+  });
+
+  // 8. Secret Redaction & Compliance Audit Logging Tests
+  console.log('\n[Module: Secret Redaction & Compliance Audit Logger]');
+
+  await test('redactSensitiveString masks database passwords in connection URIs', () => {
+    const raw = 'postgres://admin:SuperSecretPass123!@db.internal.net:5432/prod_db';
+    const redacted = redactSensitiveString(raw);
+    assert.strictEqual(redacted, 'postgres://admin:***@db.internal.net:5432/prod_db');
+  });
+
+  await test('redactSensitiveString masks Bearer tokens and JWTs', () => {
+    const header = 'Authorization: Bearer my-secret-session-token-xyz';
+    assert.strictEqual(redactSensitiveString(header), 'Authorization: Bearer [REDACTED_TOKEN]');
+
+    const jwt = 'Token is eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c in session';
+    assert(redactSensitiveString(jwt).includes('[REDACTED_JWT]'));
+  });
+
+  await test('redactSensitiveString masks API keys (sk-, ghp_)', () => {
+    const text = 'Using key sk-ant-api03-abcdef1234567890abcdef1234567890 and token ghp_123456789012345678901234567890123456';
+    const redacted = redactSensitiveString(text);
+    assert(!redacted.includes('sk-ant-'));
+    assert(!redacted.includes('ghp_'));
+    assert(redacted.includes('[REDACTED_API_KEY]'));
+  });
+
+  await test('redactSensitiveData recursively masks dictionary values for sensitive keys', () => {
+    const input = {
+      username: 'agent_007',
+      password: 'cleartext-password!',
+      api_key: 'secret-key-123',
+      nested: {
+        clientSecret: 'shhh-confidential',
+        publicId: 'public-123'
+      }
+    };
+
+    const sanitized = redactSensitiveData(input) as any;
+    assert.strictEqual(sanitized.username, 'agent_007');
+    assert.strictEqual(sanitized.password, '[REDACTED]');
+    assert.strictEqual(sanitized.api_key, '[REDACTED]');
+    assert.strictEqual(sanitized.nested.clientSecret, '[REDACTED]');
+    assert.strictEqual(sanitized.nested.publicId, 'public-123');
+  });
+
+  await test('logEvent creates immutable structured audit entry with UUID and ISO timestamp', () => {
+    const logger = new McpAuditLogger({ emitToStderr: false });
+    const entry = logger.logEvent({
+      toolName: 'query_db',
+      clientId: 'agent-prod-1',
+      status: 'SUCCESS',
+      durationMs: 45,
+      sanitizedArgs: { table: 'customers', apiKey: 'secret-123' }
+    });
+
+    assert(entry.eventId && entry.eventId.length > 10);
+    assert(entry.timestamp.includes('T'));
+    assert.strictEqual(entry.status, 'SUCCESS');
+    assert.strictEqual(entry.durationMs, 45);
+    assert.strictEqual(entry.sanitizedArgs.apiKey, '[REDACTED]');
+  });
+
+  await test('wrapExecution captures durationMs and logs SUCCESS on clean tool run', async () => {
+    const logger = new McpAuditLogger({ emitToStderr: false });
+    const res = await logger.wrapExecution('compute_sum', 'agent-a', { a: 10, b: 20 }, async () => {
+      await new Promise(r => setTimeout(r, 20));
+      return { content: [{ type: 'text', text: '30' }] };
+    });
+
+    assert.strictEqual((res as any).content[0].text, '30');
+    const events = logger.getRecentEvents(1);
+    assert.strictEqual(events.length, 1);
+    assert.strictEqual(events[0].toolName, 'compute_sum');
+    assert.strictEqual(events[0].status, 'SUCCESS');
+    assert(events[0].durationMs >= 15);
+  });
+
+  await test('wrapExecution captures error message and logs ERROR on tool failure', async () => {
+    const logger = new McpAuditLogger({ emitToStderr: false });
+    await assert.rejects(async () => {
+      await logger.wrapExecution('failing_tool', 'agent-b', { query: 'INVALID' }, async () => {
+        throw new Error('Database connection failed');
+      });
+    }, /Database connection failed/);
+
+    const events = logger.getRecentEvents(1);
+    assert.strictEqual(events.length, 1);
+    assert.strictEqual(events[0].toolName, 'failing_tool');
+    assert.strictEqual(events[0].status, 'ERROR');
+    assert.strictEqual(events[0].error?.message, 'Database connection failed');
+  });
+
+  await test('bounded ring buffer maintains max capacity and evicts oldest entries', () => {
+    const logger = new McpAuditLogger({ maxBufferSize: 3, emitToStderr: false });
+    logger.logEvent({ toolName: 't1', clientId: 'c', status: 'SUCCESS', durationMs: 1, sanitizedArgs: {} });
+    logger.logEvent({ toolName: 't2', clientId: 'c', status: 'SUCCESS', durationMs: 1, sanitizedArgs: {} });
+    logger.logEvent({ toolName: 't3', clientId: 'c', status: 'SUCCESS', durationMs: 1, sanitizedArgs: {} });
+    logger.logEvent({ toolName: 't4', clientId: 'c', status: 'SUCCESS', durationMs: 1, sanitizedArgs: {} });
+
+    const recent = logger.getRecentEvents(10);
+    assert.strictEqual(recent.length, 3);
+    assert.strictEqual(recent[0].toolName, 't2');
+    assert.strictEqual(recent[2].toolName, 't4');
+  });
+
+  await test('getRecentEvents returns empty array after clear()', () => {
+    const logger = new McpAuditLogger({ emitToStderr: false });
+    logger.logEvent({ toolName: 't1', clientId: 'c', status: 'SUCCESS', durationMs: 1, sanitizedArgs: {} });
+    assert.strictEqual(logger.getRecentEvents().length, 1);
+    logger.clear();
+    assert.strictEqual(logger.getRecentEvents().length, 0);
   });
 
   // Summary
