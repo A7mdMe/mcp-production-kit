@@ -36,6 +36,13 @@ import {
   redactSensitiveString,
   redactSensitiveData
 } from '../pro_pack/audit_logger.ts';
+import {
+  parseHostHeader,
+  verifyHostAndOrigin,
+  createHostGuardMiddleware,
+  LOOPBACK_HOSTS,
+  WILDCARD_HOSTS
+} from '../pro_pack/host_guard.ts';
 
 let passed = 0;
 let failed = 0;
@@ -765,6 +772,142 @@ async function runProPackTestSuite() {
     assert.strictEqual(logger.getRecentEvents().length, 1);
     logger.clear();
     assert.strictEqual(logger.getRecentEvents().length, 0);
+  });
+
+  // --------------------------------------------------------------------------
+  // Module 9: Host & Origin DNS Rebinding Protection Guard
+  // --------------------------------------------------------------------------
+  console.log('\n[Module: Host & Origin DNS Rebinding Protection Guard]');
+
+  await test('parseHostHeader handles standard hostname and port', () => {
+    const res = parseHostHeader('localhost:3000');
+    assert.strictEqual(res.hostname, 'localhost');
+    assert.strictEqual(res.port, 3000);
+
+    const res2 = parseHostHeader('mcp.internal');
+    assert.strictEqual(res2.hostname, 'mcp.internal');
+    assert.strictEqual(res2.port, null);
+  });
+
+  await test('parseHostHeader handles IPv6 bracket notation', () => {
+    const res = parseHostHeader('[::1]:8080');
+    assert.strictEqual(res.hostname, '[::1]');
+    assert.strictEqual(res.port, 8080);
+
+    const res2 = parseHostHeader('[2001:db8::1]');
+    assert.strictEqual(res2.hostname, '[2001:db8::1]');
+    assert.strictEqual(res2.port, null);
+  });
+
+  await test('parseHostHeader rejects malformed host headers', () => {
+    assert.throws(() => parseHostHeader('[::1:3000'), /missing closing bracket/);
+    assert.throws(() => parseHostHeader('localhost:999999'), /Invalid port/);
+    assert.throws(() => parseHostHeader('localhost:abc'), /Invalid port/);
+    assert.throws(() => parseHostHeader('a:b:c'), /unbracketed IPv6 or excessive colons/);
+  });
+
+  await test('verifyHostAndOrigin allows standard loopback hosts by default', () => {
+    assert.strictEqual(verifyHostAndOrigin({ host: 'localhost:3000' }).valid, true);
+    assert.strictEqual(verifyHostAndOrigin({ host: '127.0.0.1:8080' }).valid, true);
+    assert.strictEqual(verifyHostAndOrigin({ host: '[::1]:3000' }).valid, true);
+  });
+
+  await test('verifyHostAndOrigin rejects missing Host header with 400 and -32600', () => {
+    const res = verifyHostAndOrigin({});
+    assert.strictEqual(res.valid, false);
+    assert.strictEqual(res.statusCode, 400);
+    assert.strictEqual(res.jsonRpcError?.error.code, -32600);
+    assert.strictEqual(res.jsonRpcError?.error.message, 'Invalid Request: Missing Host header');
+  });
+
+  await test('verifyHostAndOrigin blocks Host header injection control characters', () => {
+    const res = verifyHostAndOrigin({ host: "localhost\r\nInjected-Header: evil" });
+    assert.strictEqual(res.valid, false);
+    assert.strictEqual(res.statusCode, 400);
+    assert.strictEqual(res.jsonRpcError?.error.code, -32600);
+  });
+
+  await test('verifyHostAndOrigin blocks wildcard addresses in Host header', () => {
+    const res = verifyHostAndOrigin({ host: '0.0.0.0:3000' });
+    assert.strictEqual(res.valid, false);
+    assert.strictEqual(res.statusCode, 403);
+    assert.strictEqual(res.jsonRpcError?.error.code, -32600);
+  });
+
+  await test('verifyHostAndOrigin blocks unapproved external hosts (DNS Rebinding protection)', () => {
+    const res = verifyHostAndOrigin({ host: 'rebind.attacker.com:3000' });
+    assert.strictEqual(res.valid, false);
+    assert.strictEqual(res.statusCode, 403);
+    assert.strictEqual(res.jsonRpcError?.error.code, -32600);
+    assert.ok(res.reason?.includes('DNS Rebinding'));
+  });
+
+  await test('verifyHostAndOrigin allows explicitly whitelisted hosts and wildcards', () => {
+    const opts = { allowedHosts: ['mcp.internal', '*.company.corp'] };
+    assert.strictEqual(verifyHostAndOrigin({ host: 'mcp.internal:3000' }, opts).valid, true);
+    assert.strictEqual(verifyHostAndOrigin({ host: 'agent-1.company.corp:4000' }, opts).valid, true);
+    assert.strictEqual(verifyHostAndOrigin({ host: 'other.corp' }, opts).valid, false);
+  });
+
+  await test('verifyHostAndOrigin enforces expected port when configured', () => {
+    const opts = { enforcePort: true, expectedPort: 3000 };
+    assert.strictEqual(verifyHostAndOrigin({ host: 'localhost:3000' }, opts).valid, true);
+    const res = verifyHostAndOrigin({ host: 'localhost:8080' }, opts);
+    assert.strictEqual(res.valid, false);
+    assert.strictEqual(res.statusCode, 403);
+    assert.ok(res.reason?.includes('Port mismatch'));
+  });
+
+  await test('verifyHostAndOrigin allows native clients without Origin header when allowNoOrigin is true', () => {
+    const res = verifyHostAndOrigin({ host: 'localhost:3000' }, { allowNoOrigin: true });
+    assert.strictEqual(res.valid, true);
+  });
+
+  await test('verifyHostAndOrigin blocks requests without Origin header when allowNoOrigin is false', () => {
+    const res = verifyHostAndOrigin({ host: 'localhost:3000' }, { allowNoOrigin: false });
+    assert.strictEqual(res.valid, false);
+    assert.strictEqual(res.statusCode, 403);
+    assert.strictEqual(res.jsonRpcError?.error.code, -32600);
+  });
+
+  await test('verifyHostAndOrigin rejects null Origin when allowNullOrigin is false', () => {
+    const res = verifyHostAndOrigin({ host: 'localhost:3000', origin: 'null' }, { allowNullOrigin: false });
+    assert.strictEqual(res.valid, false);
+    assert.strictEqual(res.statusCode, 403);
+    assert.ok(res.reason?.includes("Origin 'null'"));
+  });
+
+  await test('verifyHostAndOrigin blocks untrusted browser cross-origin requests', () => {
+    const res = verifyHostAndOrigin({ host: 'localhost:3000', origin: 'https://evil-site.com' });
+    assert.strictEqual(res.valid, false);
+    assert.strictEqual(res.statusCode, 403);
+    assert.strictEqual(res.jsonRpcError?.error.code, -32600);
+  });
+
+  await test('verifyHostAndOrigin permits approved origins and origin wildcards', () => {
+    const opts = { allowedOrigins: ['https://claude.ai', 'https://*.corp.internal'] };
+    assert.strictEqual(verifyHostAndOrigin({ host: 'localhost:3000', origin: 'https://claude.ai' }, opts).valid, true);
+    assert.strictEqual(verifyHostAndOrigin({ host: 'localhost:3000', origin: 'https://studio.corp.internal' }, opts).valid, true);
+    assert.strictEqual(verifyHostAndOrigin({ host: 'localhost:3000', origin: 'https://other.com' }, opts).valid, false);
+  });
+
+  await test('createHostGuardMiddleware integrates with HTTP server handlers', () => {
+    const middleware = createHostGuardMiddleware({ allowedHosts: ['localhost'] });
+
+    let nextCalled = false;
+    middleware({ headers: { host: 'localhost:3000' } }, {}, () => { nextCalled = true; });
+    assert.strictEqual(nextCalled, true);
+
+    let endedStatus = 0;
+    let endedBody = '';
+    const fakeRes = {
+      statusCode: 200,
+      setHeader: () => {},
+      end: (b: string) => { endedBody = b; endedStatus = fakeRes.statusCode; }
+    };
+    middleware({ headers: { host: 'rebind.attacker.com' } }, fakeRes, () => {});
+    assert.strictEqual(endedStatus, 403);
+    assert.ok(endedBody.includes('-32600'));
   });
 
   // Summary
