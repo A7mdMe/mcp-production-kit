@@ -20,6 +20,12 @@ import {
   MCP_ERROR_REQUEST_CANCELLED,
   MCP_ERROR_TIMEOUT
 } from '../pro_pack/cancellation_manager.ts';
+import {
+  McpAuthGuard,
+  timingSafeCompare,
+  MCP_ERROR_UNAUTHORIZED,
+  MCP_ERROR_FORBIDDEN
+} from '../pro_pack/auth_middleware.ts';
 
 let passed = 0;
 let failed = 0;
@@ -396,6 +402,119 @@ async function runProPackTestSuite() {
     assert.strictEqual(err.error.code, -32800);
     assert.strictEqual(err.error.message, 'Custom cancel');
     assert.strictEqual(err.error.data?.cancelled, true);
+  });
+
+  // 6. RFC 6750 Bearer Authentication & Tool RBAC Tests
+  console.log('\n[Module: RFC 6750 Bearer Authentication & Tool RBAC Guard]');
+
+  await test('timingSafeCompare correctly compares strings in constant time', () => {
+    assert.strictEqual(timingSafeCompare('secret-token-123', 'secret-token-123'), true);
+    assert.strictEqual(timingSafeCompare('secret-token-123', 'secret-token-456'), false);
+    assert.strictEqual(timingSafeCompare('short', 'longer-string'), false);
+  });
+
+  await test('validateHeaders returns RFC 6750 compliant challenge without error="invalid_token" when no credentials sent', () => {
+    const auth = new McpAuthGuard({ defaultScope: 'tools:all' });
+    const res = auth.validateHeaders({});
+    assert.strictEqual(res.authenticated, false);
+    assert.strictEqual(res.statusCode, 401);
+    assert(res.headers['WWW-Authenticate'].includes('Bearer realm="mcp", scope="tools:all"'));
+    assert(!res.headers['WWW-Authenticate'].includes('invalid_token')); // Crucial RFC 6750 §3.1 check
+  });
+
+  await test('validateHeaders includes resource_metadata in challenge when configured', () => {
+    const auth = new McpAuthGuard({
+      defaultScope: 'mcp:read',
+      resourceMetadataUrl: 'https://mcp.example.com/.well-known/oauth-protected-resource'
+    });
+    const res = auth.validateHeaders({});
+    assert.strictEqual(res.statusCode, 401);
+    assert(res.headers['WWW-Authenticate'].includes('resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource"'));
+  });
+
+  await test('validateHeaders returns 401 with invalid_token when bad token is provided', () => {
+    const auth = new McpAuthGuard();
+    auth.registerToken('valid-token-xyz', { clientId: 'agent-1', roles: ['admin'], scopes: ['read', 'write'] });
+    const res = auth.validateHeaders({ authorization: 'Bearer bad-token-123' });
+    assert.strictEqual(res.authenticated, false);
+    assert.strictEqual(res.statusCode, 401);
+    assert(res.headers['WWW-Authenticate'].includes('error="invalid_token"'));
+  });
+
+  await test('validateHeaders returns 401 with invalid_token when token is expired', () => {
+    const auth = new McpAuthGuard();
+    auth.registerToken('expired-token', {
+      clientId: 'agent-2',
+      roles: ['viewer'],
+      scopes: ['read'],
+      expiresAt: Date.now() - 5000 // 5 seconds in the past
+    });
+    const res = auth.validateHeaders({ authorization: 'Bearer expired-token' });
+    assert.strictEqual(res.authenticated, false);
+    assert.strictEqual(res.statusCode, 401);
+    assert(res.headers['WWW-Authenticate'].includes('The access token expired'));
+  });
+
+  await test('validateHeaders successfully authenticates valid Bearer token and returns AuthContext', () => {
+    const auth = new McpAuthGuard();
+    auth.registerToken('active-token-999', {
+      clientId: 'cursor-agent-prod',
+      tenantId: 'tenant-omega',
+      roles: ['developer'],
+      scopes: ['db:read', 'db:query']
+    });
+    const res = auth.validateHeaders({ Authorization: 'Bearer active-token-999' });
+    assert.strictEqual(res.authenticated, true);
+    assert.strictEqual(res.statusCode, 200);
+    assert.strictEqual(res.context?.clientId, 'cursor-agent-prod');
+    assert.strictEqual(res.context?.tenantId, 'tenant-omega');
+    assert(res.context?.scopes.includes('db:read'));
+  });
+
+  await test('validateHeaders successfully authenticates valid x-api-key header', () => {
+    const auth = new McpAuthGuard();
+    auth.registerToken('mcp_api_key_live_abc', {
+      clientId: 'claude-desktop-user',
+      roles: ['user'],
+      scopes: ['tools:call']
+    });
+    const res = auth.validateHeaders({ 'x-api-key': 'mcp_api_key_live_abc' });
+    assert.strictEqual(res.authenticated, true);
+    assert.strictEqual(res.statusCode, 200);
+    assert.strictEqual(res.context?.clientId, 'claude-desktop-user');
+  });
+
+  await test('authorizeToolCall permits execution when tool has no required scopes', () => {
+    const auth = new McpAuthGuard();
+    const res = auth.authorizeToolCall('system_health', { clientId: 'guest', roles: [], scopes: [] });
+    assert.strictEqual(res.allowed, true);
+  });
+
+  await test('authorizeToolCall permits execution when caller holds all required scopes', () => {
+    const auth = new McpAuthGuard();
+    auth.setRequiredToolScopes('query_postgres', ['db:read']);
+    const res = auth.authorizeToolCall('query_postgres', {
+      clientId: 'analyst',
+      roles: ['viewer'],
+      scopes: ['db:read', 'metrics:view']
+    });
+    assert.strictEqual(res.allowed, true);
+  });
+
+  await test('authorizeToolCall blocks execution with -32003 when caller lacks required scope', () => {
+    const auth = new McpAuthGuard();
+    auth.setRequiredToolScopes('mutate_records', ['db:write']);
+    const res = auth.authorizeToolCall('mutate_records', {
+      clientId: 'read-only-bot',
+      roles: ['viewer'],
+      scopes: ['db:read']
+    }, 'req-403');
+
+    assert.strictEqual(res.allowed, false);
+    assert(res.jsonRpcError);
+    assert.strictEqual(res.jsonRpcError?.error.code, MCP_ERROR_FORBIDDEN);
+    assert.strictEqual(res.jsonRpcError?.id, 'req-403');
+    assert(res.jsonRpcError?.error.message.includes("lacks required scope(s): db:write"));
   });
 
   // Summary
