@@ -132,8 +132,9 @@ docker run -p 3000:3000 -e TRANSPORT=sse mcp-production-kit
 
 ## Commercial Pro Pack ($19 One-Time)
 
-For production cloud deployments, multi-agent frameworks, and enterprise teams, the **Pro Pack** provides drop-in, battle-tested extensions with 68 dedicated automated unit tests (82 total across the project):
+For production cloud deployments, multi-agent frameworks, and enterprise teams, the **Pro Pack** provides drop-in, battle-tested extensions with 84 dedicated automated unit tests (98 total across the project):
 
+* **Host & Origin DNS Rebinding Protection Guard:** Strict host allowlisting, IPv6 bracket normalization, port mismatch blocking, cross-origin browser abuse filtering, and RFC-compliant JSON-RPC `-32600` (Invalid Request) error envelopes for HTTP and SSE transports.
 * **Secret Redaction & Compliance Audit Logger:** Multi-pattern masking of API keys (`sk-`, `ghp_`, `whsec_`), Bearer JWTs, and database passwords in connection URIs; structured immutable NDJSON audit trails strictly on `stderr`.
 * **Deterministic Tool Response Caching & Deduplication:** Canonical JSON argument hashing (SHA-256), monotonic generation tracking preventing stale overwrites, and thundering herd in-flight request coalescing.
 * **RFC 6750 Bearer Authentication & Tool RBAC Guard:** Constant-time token verification (`crypto.timingSafeEqual`) and granular per-tool required scopes with standard JSON-RPC `-32003` (Forbidden) enforcement.
@@ -144,7 +145,7 @@ For production cloud deployments, multi-agent frameworks, and enterprise teams, 
 * **Cloudflare Workers & Docker Compose:** Serverless edge hosting with streaming SSE, plus unprivileged non-root container deployment.
 
 **[Get Pro Pack ($19.00 USD) — Instant Checkout on Whop](https://whop.com/checkout/plan_eiKHeRpooY3yc)**  
-*(Delivery: Instant download of `mcp-pro-pack-v1.6.0.zip` via Whop Files and customer billing portal upon completion).*
+*(Delivery: Instant download of `mcp-pro-pack-v1.7.0.zip` via Whop Files and customer billing portal upon completion).*
 
 ---
 
