@@ -26,6 +26,11 @@ import {
   MCP_ERROR_UNAUTHORIZED,
   MCP_ERROR_FORBIDDEN
 } from '../pro_pack/auth_middleware.ts';
+import {
+  McpToolCache,
+  generateToolCacheKey,
+  canonicalJsonStringify
+} from '../pro_pack/tool_cache.ts';
 
 let passed = 0;
 let failed = 0;
@@ -515,6 +520,134 @@ async function runProPackTestSuite() {
     assert.strictEqual(res.jsonRpcError?.error.code, MCP_ERROR_FORBIDDEN);
     assert.strictEqual(res.jsonRpcError?.id, 'req-403');
     assert(res.jsonRpcError?.error.message.includes("lacks required scope(s): db:write"));
+  });
+
+  // 7. Deterministic Tool Caching & Deduplication Tests
+  console.log('\n[Module: Deterministic Tool Response Caching & Deduplication]');
+
+  await test('canonicalJsonStringify recursively sorts dictionary keys for identical strings', () => {
+    const obj1 = { b: 2, a: 1, nested: { y: 'bar', x: 'foo' } };
+    const obj2 = { a: 1, nested: { x: 'foo', y: 'bar' }, b: 2 };
+    assert.strictEqual(canonicalJsonStringify(obj1), canonicalJsonStringify(obj2));
+  });
+
+  await test('generateToolCacheKey yields identical SHA-256 hashes for out-of-order arguments', () => {
+    const k1 = generateToolCacheKey('query_sql', { limit: 10, offset: 0, query: 'SELECT 1' });
+    const k2 = generateToolCacheKey('query_sql', { query: 'SELECT 1', offset: 0, limit: 10 });
+    assert.strictEqual(k1, k2);
+  });
+
+  await test('get returns hit=false on uncached tool call', () => {
+    const cache = new McpToolCache();
+    const res = cache.get('fetch_data', { id: 123 });
+    assert.strictEqual(res.hit, false);
+  });
+
+  await test('set and get successfully cache and retrieve tool execution results', () => {
+    const cache = new McpToolCache({ defaultTtlMs: 5000 });
+    cache.set('fetch_data', { id: 123 }, { status: 'ok', payload: [1, 2, 3] });
+    const res = cache.get<{ status: string; payload: number[] }>('fetch_data', { id: 123 });
+    assert.strictEqual(res.hit, true);
+    if (res.hit) {
+      assert.strictEqual(res.value.status, 'ok');
+      assert.strictEqual(res.value.payload.length, 3);
+      assert(res.ageMs >= 0);
+    }
+  });
+
+  await test('cache entry automatically expires past its TTL', async () => {
+    const cache = new McpToolCache({ defaultTtlMs: 50 }); // 50ms TTL
+    cache.set('quick_expire', { q: 'test' }, 'value');
+    await new Promise(r => setTimeout(r, 70)); // wait past TTL
+    const res = cache.get('quick_expire', { q: 'test' });
+    assert.strictEqual(res.hit, false);
+  });
+
+  await test('stale writes are rejected when tool generation has advanced (resolves #3075)', () => {
+    const cache = new McpToolCache();
+    const oldGen = cache.captureGeneration('search_docs'); // generation 0
+    cache.invalidateTool('search_docs'); // generation becomes 1
+    const accepted = cache.set('search_docs', { q: 'stale' }, 'old_data', { generation: oldGen });
+    assert.strictEqual(accepted, false);
+    const res = cache.get('search_docs', { q: 'stale' });
+    assert.strictEqual(res.hit, false); // Stale data was never written!
+  });
+
+  await test('executeWithCache executes executor on first call and returns cached=false', async () => {
+    const cache = new McpToolCache();
+    let executions = 0;
+    const res = await cache.executeWithCache('heavy_job', { n: 5 }, async () => {
+      executions++;
+      return 5 * 2;
+    });
+    assert.strictEqual(executions, 1);
+    assert.strictEqual(res.cached, false);
+    assert.strictEqual(res.data, 10);
+  });
+
+  await test('executeWithCache returns cached result on subsequent call without re-invoking executor', async () => {
+    const cache = new McpToolCache();
+    let executions = 0;
+    const fn = async () => {
+      executions++;
+      return 'calculated-val';
+    };
+
+    await cache.executeWithCache('heavy_job', { id: 42 }, fn);
+    const res2 = await cache.executeWithCache('heavy_job', { id: 42 }, fn);
+
+    assert.strictEqual(executions, 1); // Not called again!
+    assert.strictEqual(res2.cached, true);
+    assert.strictEqual(res2.data, 'calculated-val');
+  });
+
+  await test('thundering herd coalescing deduplicates concurrent executions onto a single promise', async () => {
+    const cache = new McpToolCache();
+    let backendCalls = 0;
+
+    const slowQuery = async () => {
+      backendCalls++;
+      await new Promise(r => setTimeout(r, 60));
+      return { rows: [100, 200] };
+    };
+
+    // Fire 3 simultaneous calls
+    const [p1, p2, p3] = await Promise.all([
+      cache.executeWithCache('shared_db_query', { table: 'users' }, slowQuery),
+      cache.executeWithCache('shared_db_query', { table: 'users' }, slowQuery),
+      cache.executeWithCache('shared_db_query', { table: 'users' }, slowQuery)
+    ]);
+
+    assert.strictEqual(backendCalls, 1); // Only ONE actual call to backend!
+    assert.strictEqual(p1.data.rows.length, 2);
+    assert.strictEqual(p2.data.rows.length, 2);
+    assert.strictEqual(p3.data.rows.length, 2);
+    assert.strictEqual(cache.getStats().coalesced, 2);
+  });
+
+  await test('invalidateTool forces next execution to fetch fresh data', async () => {
+    const cache = new McpToolCache();
+    let counter = 0;
+    const getCounter = async () => ++counter;
+
+    await cache.executeWithCache('dynamic_metric', {}, getCounter); // 1
+    cache.invalidateTool('dynamic_metric'); // flush
+    const res = await cache.executeWithCache('dynamic_metric', {}, getCounter); // 2
+
+    assert.strictEqual(res.cached, false);
+    assert.strictEqual(res.data, 2);
+  });
+
+  await test('maxEntries LRU capacity eviction evicts oldest key when capacity exceeded', () => {
+    const cache = new McpToolCache({ maxEntries: 2 });
+    cache.set('tool', { id: 1 }, 'first');
+    cache.set('tool', { id: 2 }, 'second');
+    cache.set('tool', { id: 3 }, 'third'); // should evict id:1
+
+    assert.strictEqual(cache.get('tool', { id: 1 }).hit, false);
+    assert.strictEqual(cache.get('tool', { id: 2 }).hit, true);
+    assert.strictEqual(cache.get('tool', { id: 3 }).hit, true);
+    assert.strictEqual(cache.getStats().evictions, 1);
   });
 
   // Summary
