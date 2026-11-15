@@ -43,6 +43,12 @@ import {
   LOOPBACK_HOSTS,
   WILDCARD_HOSTS
 } from '../pro_pack/host_guard.ts';
+import {
+  AuthChallengeError,
+  formatWwwAuthenticateHeader,
+  formatAuthChallengeJsonRpc,
+  wrapToolHandlerWithAuthCheck
+} from '../pro_pack/auth_challenge.ts';
 
 let passed = 0;
 let failed = 0;
@@ -908,6 +914,139 @@ async function runProPackTestSuite() {
     middleware({ headers: { host: 'rebind.attacker.com' } }, fakeRes, () => {});
     assert.strictEqual(endedStatus, 403);
     assert.ok(endedBody.includes('-32600'));
+  });
+
+  // --------------------------------------------------------------------------
+  // Module 10: Mid-Execution Auth Challenge & Token Revocation Handler
+  // --------------------------------------------------------------------------
+  console.log('\n[Module: Mid-Execution Auth Challenge & Token Revocation Handler]');
+
+  await test('AuthChallengeError.invalidToken creates 401 challenge with invalid_token and defaults', () => {
+    const err = AuthChallengeError.invalidToken();
+    assert.strictEqual(err.status, 401);
+    assert.strictEqual(err.authError, 'invalid_token');
+    assert.strictEqual(err.errorDescription, 'Session revoked; re-authentication required');
+    assert.strictEqual(err.scopes, undefined);
+  });
+
+  await test('AuthChallengeError.invalidToken rejects options specifying scopes', () => {
+    assert.throws(
+      () => new AuthChallengeError({ status: 401, scopes: ['read:data'] }),
+      /Scopes must not be specified on an invalid_token/
+    );
+  });
+
+  await test('AuthChallengeError.insufficientScope creates 403 challenge with required scopes', () => {
+    const err = AuthChallengeError.insufficientScope(['read:reports', 'write:reports'], 'Report access needed');
+    assert.strictEqual(err.status, 403);
+    assert.strictEqual(err.authError, 'insufficient_scope');
+    assert.deepStrictEqual(err.scopes, ['read:reports', 'write:reports']);
+    assert.strictEqual(err.errorDescription, 'Report access needed');
+  });
+
+  await test('AuthChallengeError.insufficientScope throws if scopes array is empty or missing', () => {
+    assert.throws(
+      () => new AuthChallengeError({ status: 403, scopes: [] }),
+      /must specify the missing required scopes/
+    );
+  });
+
+  await test('AuthChallengeError.sanitizeDescription redacts vendor API keys and secrets', () => {
+    const raw = 'Upstream API failed for sk-ant-api03-abcdef1234567890_test with ghp_123456789012345678901234567890123456';
+    const sanitized = AuthChallengeError.sanitizeDescription(raw);
+    assert.ok(!sanitized.includes('sk-ant-'));
+    assert.ok(!sanitized.includes('ghp_'));
+    assert.ok(sanitized.includes('[REDACTED_SECRET]'));
+  });
+
+  await test('AuthChallengeError.sanitizeDescription redacts database URIs and connection passwords', () => {
+    const raw = 'Failed to connect to postgres://app_user:secret_password_123@db.prod.internal:5432/mcp';
+    const sanitized = AuthChallengeError.sanitizeDescription(raw);
+    assert.ok(!sanitized.includes('secret_password_123'));
+    assert.ok(sanitized.includes('postgres://app_user:[REDACTED]@db.prod.internal:5432/mcp'));
+  });
+
+  await test('formatWwwAuthenticateHeader formats RFC 6750 Bearer challenge for 401 invalid_token', () => {
+    const err = AuthChallengeError.invalidToken('Upstream session expired', 'https://auth.example.com/.well-known/oauth');
+    const header = formatWwwAuthenticateHeader(err);
+    assert.ok(header.startsWith('Bearer '));
+    assert.ok(header.includes('error="invalid_token"'));
+    assert.ok(header.includes('error_description="Upstream session expired"'));
+    assert.ok(header.includes('resource_metadata="https://auth.example.com/.well-known/oauth"'));
+    assert.ok(!header.includes('scope='));
+  });
+
+  await test('formatWwwAuthenticateHeader formats RFC 6750 Bearer challenge for 403 insufficient_scope', () => {
+    const err = AuthChallengeError.insufficientScope(['tools:execute', 'admin'], 'Admin rights required');
+    const header = formatWwwAuthenticateHeader(err);
+    assert.ok(header.startsWith('Bearer '));
+    assert.ok(header.includes('error="insufficient_scope"'));
+    assert.ok(header.includes('scope="tools:execute admin"'));
+    assert.ok(header.includes('error_description="Admin rights required"'));
+  });
+
+  await test('formatAuthChallengeJsonRpc emits JSON-RPC -32001 with reauthorize=true on 401 challenge', () => {
+    const err = AuthChallengeError.invalidToken('Session revoked', 'https://auth.example.com/meta');
+    const rpc = formatAuthChallengeJsonRpc('req-1', err);
+    assert.strictEqual(rpc.jsonrpc, '2.0');
+    assert.strictEqual(rpc.id, 'req-1');
+    assert.strictEqual(rpc.error.code, -32001);
+    assert.strictEqual(rpc.error.data.status, 401);
+    assert.strictEqual(rpc.error.data.error, 'invalid_token');
+    assert.strictEqual(rpc.error.data.reauthorize, true);
+    assert.strictEqual(rpc.error.data.resourceMetadata, 'https://auth.example.com/meta');
+    assert.strictEqual(rpc.error.data.scopes, undefined);
+  });
+
+  await test('formatAuthChallengeJsonRpc emits JSON-RPC -32003 with reauthorize=false and scopes on 403 challenge', () => {
+    const err = AuthChallengeError.insufficientScope(['metrics:read']);
+    const rpc = formatAuthChallengeJsonRpc(42, err);
+    assert.strictEqual(rpc.id, 42);
+    assert.strictEqual(rpc.error.code, -32003);
+    assert.strictEqual(rpc.error.data.status, 403);
+    assert.strictEqual(rpc.error.data.error, 'insufficient_scope');
+    assert.strictEqual(rpc.error.data.reauthorize, false);
+    assert.deepStrictEqual(rpc.error.data.scopes, ['metrics:read']);
+  });
+
+  await test('wrapToolHandlerWithAuthCheck passes through successful executions', async () => {
+    const wrapped = wrapToolHandlerWithAuthCheck(async (args: { num: number }) => {
+      return { result: args.num * 2 };
+    });
+    const res = await wrapped({ num: 21 });
+    assert.deepStrictEqual(res, { result: 42 });
+  });
+
+  await test('wrapToolHandlerWithAuthCheck intercepts AuthChallengeError and formats structured payload', async () => {
+    let capturedChallenge: any = null;
+    const wrapped = wrapToolHandlerWithAuthCheck(
+      async () => {
+        throw AuthChallengeError.invalidToken('Upstream OAuth revoked');
+      },
+      {
+        resourceMetadata: 'https://auth.corp.net',
+        onChallenge: (c) => { capturedChallenge = c; }
+      }
+    );
+
+    const res = await wrapped({});
+    assert.strictEqual((res as any).isError, true);
+    assert.ok((res as any).content[0].text.includes('[AUTH_CHALLENGE:401]'));
+    assert.strictEqual((res as any)._authChallenge?.status, 401);
+    assert.strictEqual((res as any)._authChallenge?.error, 'invalid_token');
+    assert.ok((res as any)._authChallenge?.wwwAuthenticate.includes('error="invalid_token"'));
+    assert.strictEqual(capturedChallenge?.status, 401);
+  });
+
+  await test('wrapToolHandlerWithAuthCheck rethrows unexpected errors without interference', async () => {
+    const wrapped = wrapToolHandlerWithAuthCheck(async () => {
+      throw new Error('Database disk full');
+    });
+
+    await assert.rejects(
+      async () => await wrapped({}),
+      /Database disk full/
+    );
   });
 
   // Summary
