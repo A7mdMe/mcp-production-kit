@@ -132,8 +132,9 @@ docker run -p 3000:3000 -e TRANSPORT=sse mcp-production-kit
 
 ## Commercial Pro Pack ($19 One-Time)
 
-For production cloud deployments, multi-agent frameworks, and enterprise teams, the **Pro Pack** provides drop-in, battle-tested extensions with 109 dedicated automated unit tests (123 total across the project):
+For production cloud deployments, multi-agent frameworks, and enterprise teams, the **Pro Pack** provides drop-in, battle-tested extensions with 121 dedicated automated unit tests (135 total across the project):
 
+* **Lossless 64-Bit Integer & BigInt Codec:** Prevents precision corruption on 64-bit integers (PostgreSQL `BIGINT`, Discord/Twitter Snowflakes, nanosecond timestamps, micro-units) exceeding `Number.MAX_SAFE_INTEGER` (`9,007,199,254,740,991`), eliminates `TypeError: Do not know how to serialize a BigInt` in tool responses, and guarantees bit-for-bit round-trip fidelity.
 * **Self-Healing Input Validator & RFC 9457 Formatter:** Coerces primitive strings emitted by LLMs (`"42"` -> `42`, `"true"` -> `true`, stringified JSON), replaces prose errors with structured RFC 9457 `structuredContent` and actionable missing/received argument diffs, preventing agents from burning reasoning loops.
 * **Mid-Execution Auth Challenges & Token Revocation:** Intercepts upstream OAuth failures and revoked user grants inside tool handlers, emitting standard RFC 6750 `401 invalid_token` (re-authorize) and `403 insufficient_scope` (widen grant) challenges with `WWW-Authenticate` and RFC 9728 `resource_metadata`, prompting AI clients to prompt for re-authorization instead of swallowing failures into generic `{ isError: true }` text strings.
 * **Host & Origin DNS Rebinding Protection Guard:** Strict host allowlisting, IPv6 bracket normalization, port mismatch blocking, cross-origin browser abuse filtering, and RFC-compliant JSON-RPC `-32600` (Invalid Request) error envelopes for HTTP and SSE transports.
@@ -147,7 +148,7 @@ For production cloud deployments, multi-agent frameworks, and enterprise teams, 
 * **Cloudflare Workers & Docker Compose:** Serverless edge hosting with streaming SSE, plus unprivileged non-root container deployment.
 
 **[Get Pro Pack ($19.00 USD) — Instant Checkout on Whop](https://whop.com/checkout/plan_eiKHeRpooY3yc)**  
-*(Delivery: Instant download of `mcp-pro-pack-v1.9.0.zip` via Whop Files and customer billing portal upon completion).*
+*(Delivery: Instant download of `mcp-pro-pack-v2.0.0.zip` via Whop Files and customer billing portal upon completion).*
 
 ---
 
