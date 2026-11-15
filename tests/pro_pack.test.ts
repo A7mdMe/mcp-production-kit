@@ -55,6 +55,13 @@ import {
   formatValidationSummary,
   createStructuredToolHandler
 } from '../pro_pack/input_validator.ts';
+import {
+  parseExactJson,
+  stringifyExactJson,
+  detectPrecisionLoss,
+  isUnsafeIntegerString,
+  wrapToolResultWithExactNumbers
+} from '../pro_pack/lossless_json.ts';
 
 let passed = 0;
 let failed = 0;
@@ -1223,6 +1230,104 @@ async function runProPackTestSuite() {
     assert.strictEqual((res as any).isError, true);
     assert.strictEqual((res as any).content[0].text, 'CUSTOM_ERROR:custom_tool');
     assert.strictEqual((res as any).structuredContent?.customCode, 'ERR_INVALID_PAYLOAD');
+  });
+
+  // --------------------------------------------------------------------------
+  // Module 12: Lossless 64-Bit Integer & BigInt Codec
+  // --------------------------------------------------------------------------
+  console.log('\n[Module: Lossless 64-Bit Integer & BigInt Codec]');
+
+  await test('isUnsafeIntegerString identifies safe vs unsafe integers accurately', () => {
+    assert.strictEqual(isUnsafeIntegerString('42'), false);
+    assert.strictEqual(isUnsafeIntegerString('9007199254740991'), false); // MAX_SAFE_INTEGER
+    assert.strictEqual(isUnsafeIntegerString('-9007199254740991'), false); // MIN_SAFE_INTEGER
+    assert.strictEqual(isUnsafeIntegerString('9007199254740993'), true); // 2^53 + 1
+    assert.strictEqual(isUnsafeIntegerString('9223372036854775807'), true); // int64 max
+    assert.strictEqual(isUnsafeIntegerString('-9223372036854775808'), true); // int64 min
+    assert.strictEqual(isUnsafeIntegerString('not_a_number'), false);
+  });
+
+  await test('detectPrecisionLoss detects unsafe integers in raw JSON strings', () => {
+    const raw = '{"userId": 9007199254740993, "amount": 500, "txId": 9223372036854775807}';
+    const detection = detectPrecisionLoss(raw);
+    assert.strictEqual(detection.hasUnsafeIntegers, true);
+    assert.strictEqual(detection.unsafeTokens.length, 2);
+    assert.ok(detection.unsafeTokens.includes('9007199254740993'));
+    assert.ok(detection.unsafeTokens.includes('9223372036854775807'));
+  });
+
+  await test('detectPrecisionLoss reports false on standard safe JSON', () => {
+    const raw = '{"id": 42, "ratio": 3.14159, "flag": true}';
+    const detection = detectPrecisionLoss(raw);
+    assert.strictEqual(detection.hasUnsafeIntegers, false);
+    assert.strictEqual(detection.unsafeTokens.length, 0);
+  });
+
+  await test('parseExactJson preserves standard safe numbers as JavaScript numbers', () => {
+    const raw = '{"count": 100, "pi": 3.14}';
+    const parsed = parseExactJson(raw) as any;
+    assert.strictEqual(typeof parsed.count, 'number');
+    assert.strictEqual(parsed.count, 100);
+    assert.strictEqual(parsed.pi, 3.14);
+  });
+
+  await test('parseExactJson revives 9007199254740993 as BigInt without IEEE 754 rounding', () => {
+    const raw = '{"snowflake": 9007199254740993}';
+    const parsed = parseExactJson(raw) as any;
+    assert.strictEqual(typeof parsed.snowflake, 'bigint');
+    assert.strictEqual(parsed.snowflake, 9007199254740993n);
+    assert.notStrictEqual(parsed.snowflake, 9007199254740992n);
+  });
+
+  await test('parseExactJson revives int64 max and min bounds exactly', () => {
+    const raw = '{"max": 9223372036854775807, "min": -9223372036854775808}';
+    const parsed = parseExactJson(raw) as any;
+    assert.strictEqual(parsed.max, 9223372036854775807n);
+    assert.strictEqual(parsed.min, -9223372036854775808n);
+  });
+
+  await test('parseExactJson supports useBigInt=false returning raw string', () => {
+    const raw = '{"id": 9007199254740993}';
+    const parsed = parseExactJson(raw, { useBigInt: false }) as any;
+    assert.strictEqual(parsed.id, '9007199254740993');
+  });
+
+  await test('stringifyExactJson serializes BigInt without throwing TypeError', () => {
+    const obj = { id: 9007199254740993n, name: 'record' };
+    assert.doesNotThrow(() => stringifyExactJson(obj));
+  });
+
+  await test('stringifyExactJson in raw_number mode emits unquoted numeric tokens', () => {
+    const obj = { id: 9007199254740993n, active: true };
+    const json = stringifyExactJson(obj, { bigIntSerialization: 'raw_number' });
+    assert.ok(json.includes('"id":9007199254740993') || json.includes('"id": 9007199254740993'));
+    assert.ok(!json.includes('"id":"9007199254740993"'));
+  });
+
+  await test('stringifyExactJson in string mode emits quoted string tokens', () => {
+    const obj = { id: 9007199254740993n };
+    const json = stringifyExactJson(obj, { bigIntSerialization: 'string' });
+    assert.ok(json.includes('"id":"9007199254740993"'));
+  });
+
+  await test('parseExactJson and stringifyExactJson achieve round-trip token-for-token fidelity', () => {
+    const original = '{"big":9007199254740993,"int64Max":9223372036854775807,"safe":42}';
+    const decoded = parseExactJson(original);
+    const reEncoded = stringifyExactJson(decoded);
+    assert.strictEqual(reEncoded, original);
+  });
+
+  await test('wrapToolResultWithExactNumbers packages BigInt results cleanly for MCP responses', () => {
+    const toolOutput = {
+      recordId: 9223372036854775807n,
+      txHash: '0x123',
+      timestampNs: 1716382910123456789n
+    };
+    const wrapped = wrapToolResultWithExactNumbers(toolOutput);
+    assert.strictEqual(wrapped.content[0].type, 'text');
+    assert.ok(wrapped.content[0].text.includes('9223372036854775807'));
+    assert.ok(wrapped.content[0].text.includes('1716382910123456789'));
+    assert.strictEqual(wrapped.structuredContent.recordId, 9223372036854775807n);
   });
 
   // Summary
