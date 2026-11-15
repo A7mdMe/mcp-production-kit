@@ -49,6 +49,12 @@ import {
   formatAuthChallengeJsonRpc,
   wrapToolHandlerWithAuthCheck
 } from '../pro_pack/auth_challenge.ts';
+import {
+  normalizeToolArguments,
+  buildProblemDetails,
+  formatValidationSummary,
+  createStructuredToolHandler
+} from '../pro_pack/input_validator.ts';
 
 let passed = 0;
 let failed = 0;
@@ -1047,6 +1053,176 @@ async function runProPackTestSuite() {
       async () => await wrapped({}),
       /Database disk full/
     );
+  });
+
+  // --------------------------------------------------------------------------
+  // Module 11: Structured Input Validator, Self-Healing Coercion & RFC 9457
+  // --------------------------------------------------------------------------
+  console.log('\n[Module: Structured Input Validator, Self-Healing Coercion & RFC 9457]');
+
+  await test('normalizeToolArguments coerces integer and float strings to numbers', () => {
+    const raw = { limit: '50', score: '98.6', text: 'normal string' };
+    const normalized = normalizeToolArguments(raw);
+    assert.strictEqual(normalized.limit, 50);
+    assert.strictEqual(normalized.score, 98.6);
+    assert.strictEqual(normalized.text, 'normal string');
+  });
+
+  await test('normalizeToolArguments coerces boolean strings', () => {
+    const raw = { active: 'true', disabled: 'false', uppercase: 'TRUE' };
+    const normalized = normalizeToolArguments(raw);
+    assert.strictEqual(normalized.active, true);
+    assert.strictEqual(normalized.disabled, false);
+    assert.strictEqual(normalized.uppercase, true);
+  });
+
+  await test('normalizeToolArguments parses stringified JSON objects and arrays', () => {
+    const raw = {
+      config: '{"timeout": 5000, "debug": true}',
+      tags: '["alpha", "beta", "gamma"]'
+    };
+    const normalized = normalizeToolArguments(raw);
+    assert.deepStrictEqual(normalized.config, { timeout: 5000, debug: true });
+    assert.deepStrictEqual(normalized.tags, ['alpha', 'beta', 'gamma']);
+  });
+
+  await test('normalizeToolArguments recurses into nested dictionaries', () => {
+    const raw = {
+      user: {
+        id: '123',
+        verified: 'true',
+        metadata: { retryCount: '3' }
+      }
+    };
+    const normalized = normalizeToolArguments(raw);
+    assert.deepStrictEqual(normalized, {
+      user: {
+        id: 123,
+        verified: true,
+        metadata: { retryCount: 3 }
+      }
+    });
+  });
+
+  await test('normalizeToolArguments preserves non-numeric strings and invalid JSON without corruption', () => {
+    const raw = { code: 'abc123', brokenJson: '{not a json' };
+    const normalized = normalizeToolArguments(raw);
+    assert.strictEqual(normalized.code, 'abc123');
+    assert.strictEqual(normalized.brokenJson, '{not a json');
+  });
+
+  await test('normalizeToolArguments leaves values unchanged when coercion options are disabled', () => {
+    const raw = { count: '100', flag: 'true' };
+    const normalized = normalizeToolArguments(raw, { autoCoercePrimitives: false });
+    assert.strictEqual(normalized.count, '100');
+    assert.strictEqual(normalized.flag, 'true');
+  });
+
+  await test('buildProblemDetails formats RFC 9457 compliant Problem Details', () => {
+    const issues = [
+      { name: 'limit', path: ['limit'], reason: 'Too small: expected number to be >=1', received: 0, expected: '>=1' }
+    ];
+    const problem = buildProblemDetails('query_database', issues, { limit: 0, query: 'SELECT 1' });
+    assert.strictEqual(problem.type, 'https://modelcontextprotocol.io/errors/invalid-tool-arguments');
+    assert.strictEqual(problem.title, 'Invalid Tool Arguments');
+    assert.strictEqual(problem.status, 400);
+    assert.strictEqual(problem.tool, 'query_database');
+    assert.strictEqual(problem.invalidParams.length, 1);
+    assert.deepStrictEqual(problem.receivedKeys, ['limit', 'query']);
+  });
+
+  await test('buildProblemDetails identifies missingKeys against expectedKeys', () => {
+    const issues = [{ name: 'query', path: ['query'], reason: 'Required field missing' }];
+    const problem = buildProblemDetails('query_database', issues, { limit: 10 }, ['query', 'limit']);
+    assert.deepStrictEqual(problem.expectedKeys, ['query', 'limit']);
+    assert.deepStrictEqual(problem.missingKeys, ['query']);
+    assert.ok(problem.hint?.includes('Missing required parameters: query'));
+  });
+
+  await test('formatValidationSummary produces readable multi-line summary for prompt injection', () => {
+    const problem = buildProblemDetails(
+      'search_users',
+      [{ name: 'role', path: ['role'], reason: 'Invalid enum value', received: 'superadmin' }],
+      { role: 'superadmin' },
+      ['role', 'tenantId']
+    );
+    const summary = formatValidationSummary(problem);
+    assert.ok(summary.includes("Input validation error for tool 'search_users':"));
+    assert.ok(summary.includes("Parameter 'role': Invalid enum value"));
+    assert.ok(summary.includes("Missing required: [tenantId]"));
+    assert.ok(summary.includes("Received keys: [role]"));
+  });
+
+  await test('createStructuredToolHandler heals arguments and executes tool successfully', async () => {
+    const schemaValidator = (args: Record<string, unknown>) => {
+      if (typeof args.limit === 'number' && typeof args.active === 'boolean') {
+        return { success: true as const, data: { limit: args.limit, active: args.active } };
+      }
+      return {
+        success: false as const,
+        issues: [{ name: 'args', path: [], reason: 'Type error' }]
+      };
+    };
+
+    const handler = createStructuredToolHandler(
+      'get_items',
+      schemaValidator,
+      async (args) => ({ retrieved: args.limit, status: args.active })
+    );
+
+    // Call with stringified primitives emitted by an LLM
+    const res = await handler({ limit: '25', active: 'true' });
+    assert.deepStrictEqual(res, { retrieved: 25, status: true });
+  });
+
+  await test('createStructuredToolHandler returns RFC 9457 structuredContent and isError=true on failure', async () => {
+    const schemaValidator = (args: Record<string, unknown>) => {
+      if (typeof args.query === 'string' && args.query.length > 0) {
+        return { success: true as const, data: { query: args.query } };
+      }
+      return {
+        success: false as const,
+        issues: [{ name: 'query', path: ['query'], reason: 'String must contain at least 1 character(s)', received: '' }]
+      };
+    };
+
+    const handler = createStructuredToolHandler(
+      'search_docs',
+      schemaValidator,
+      async (args) => ({ found: [args.query] }),
+      { expectedKeys: ['query'] }
+    );
+
+    const res = await handler({ query: '' });
+    assert.strictEqual((res as any).isError, true);
+    assert.ok((res as any).content[0].text.includes("Input validation error for tool 'search_docs'"));
+    assert.strictEqual((res as any).structuredContent?.status, 400);
+    assert.strictEqual((res as any).structuredContent?.tool, 'search_docs');
+    assert.strictEqual((res as any).structuredContent?.invalidParams[0].name, 'query');
+  });
+
+  await test('createStructuredToolHandler supports custom onValidationError hook', async () => {
+    const schemaValidator = () => ({
+      success: false as const,
+      issues: [{ name: 'id', path: ['id'], reason: 'Not found' }]
+    });
+
+    const handler = createStructuredToolHandler(
+      'custom_tool',
+      schemaValidator,
+      async () => ({ ok: true }),
+      {
+        onValidationError: ({ toolName, problem }) => ({
+          text: `CUSTOM_ERROR:${toolName}`,
+          structuredContent: { customCode: 'ERR_INVALID_PAYLOAD', detail: problem }
+        })
+      }
+    );
+
+    const res = await handler({});
+    assert.strictEqual((res as any).isError, true);
+    assert.strictEqual((res as any).content[0].text, 'CUSTOM_ERROR:custom_tool');
+    assert.strictEqual((res as any).structuredContent?.customCode, 'ERR_INVALID_PAYLOAD');
   });
 
   // Summary
