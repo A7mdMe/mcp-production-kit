@@ -67,6 +67,12 @@ import {
   classifyJsonRpcPayload,
   FastPathDispatcher
 } from '../pro_pack/message_classifier.ts';
+import {
+  StreamLifecycleGuard,
+  defaultStreamLifecycleGuard
+} from '../pro_pack/stream_lifecycle_guard.ts';
+import { Readable } from 'node:stream';
+import { EventEmitter } from 'node:events';
 
 let passed = 0;
 let failed = 0;
@@ -1463,6 +1469,217 @@ async function runProPackTestSuite() {
     assert.strictEqual(metrics.requestsCount, 2);
     assert.strictEqual(metrics.notificationsCount, 1);
     assert.ok(metrics.averageLatencyNs >= 0);
+  });
+
+  // =========================================================================
+  // Module 15: HTTP & SSE Stream Lifecycle, Slowloris Guard & Instant Disconnect
+  // =========================================================================
+  console.log('\n[Module: HTTP & SSE Stream Lifecycle Guard & Slowloris Defense]');
+
+  await test('readWebStream reads valid JSON payload within size and arrival deadlines', async () => {
+    const guard = new StreamLifecycleGuard();
+    const encoder = new TextEncoder();
+    const payload = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
+
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(payload.slice(0, 10)));
+        controller.enqueue(encoder.encode(payload.slice(10)));
+        controller.close();
+      }
+    });
+
+    const res = await guard.readWebStream(stream, { maxBytes: 1024, bodyTimeoutMs: 2000 });
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(res.statusCode, 200);
+    assert.strictEqual(res.bytesRead, payload.length);
+    assert.deepStrictEqual(res.json, { jsonrpc: '2.0', id: 1, method: 'tools/list' });
+  });
+
+  await test('readWebStream rejects oversized body with 413 and cancels reader', async () => {
+    const guard = new StreamLifecycleGuard();
+    const encoder = new TextEncoder();
+    let readerCancelled = false;
+
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('chunk-one-is-15-bytes-long'));
+        controller.enqueue(encoder.encode('chunk-two-pushes-over-limit'));
+        controller.close();
+      },
+      cancel() {
+        readerCancelled = true;
+      }
+    });
+
+    const res = await guard.readWebStream(stream, { maxBytes: 20, bodyTimeoutMs: 2000 });
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.errorCode, 'PAYLOAD_TOO_LARGE');
+    assert.strictEqual(res.statusCode, 413);
+    assert.strictEqual(res.jsonRpcError?.error.code, -32600);
+    assert.strictEqual(readerCancelled, true);
+  });
+
+  await test('readWebStream returns 408 on body arrival timeout and cancels reader (Slowloris)', async () => {
+    const guard = new StreamLifecycleGuard();
+    const encoder = new TextEncoder();
+    let cancelCalled = false;
+
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('{"jsonrpc":"2.0",'));
+      },
+      cancel() {
+        cancelCalled = true;
+      }
+    });
+
+    const res = await guard.readWebStream(stream, { maxBytes: 1024, bodyTimeoutMs: 50 });
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.errorCode, 'BODY_TIMEOUT');
+    assert.strictEqual(res.statusCode, 408);
+    assert.strictEqual(res.jsonRpcError?.error.code, -32000);
+    assert.strictEqual(cancelCalled, true);
+  });
+
+  await test('readWebStream cancels reader on external AbortSignal (499)', async () => {
+    const guard = new StreamLifecycleGuard();
+    const controller = new AbortController();
+    const encoder = new TextEncoder();
+    let cancelCalled = false;
+
+    const stream = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(encoder.encode('first-part'));
+      },
+      cancel() {
+        cancelCalled = true;
+      }
+    });
+
+    setTimeout(() => controller.abort(), 20);
+    const res = await guard.readWebStream(stream, { maxBytes: 1024, bodyTimeoutMs: 5000, signal: controller.signal });
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.errorCode, 'CLIENT_ABORTED');
+    assert.strictEqual(res.statusCode, 499);
+    assert.strictEqual(res.jsonRpcError?.error.code, -32800);
+    assert.strictEqual(cancelCalled, true);
+  });
+
+  await test('readNodeStream reads standard Node.js readable streams successfully', async () => {
+    const guard = new StreamLifecycleGuard();
+    const payload = JSON.stringify({ jsonrpc: '2.0', id: 42, method: 'ping' });
+    const nodeStream = Readable.from([Buffer.from(payload)]);
+
+    const res = await guard.readNodeStream(nodeStream, { maxBytes: 1024, bodyTimeoutMs: 2000 });
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(res.statusCode, 200);
+    assert.strictEqual(res.text, payload);
+    assert.deepStrictEqual(res.json, { jsonrpc: '2.0', id: 42, method: 'ping' });
+  });
+
+  await test('readNodeStream enforces maxBytes and destroys stream on oversized payload', async () => {
+    const guard = new StreamLifecycleGuard();
+    const chunks = [Buffer.from('hello-world-chunk-one'), Buffer.from('hello-world-chunk-two')];
+    const nodeStream = Readable.from(chunks);
+
+    const res = await guard.readNodeStream(nodeStream, { maxBytes: 15, bodyTimeoutMs: 2000 });
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.errorCode, 'PAYLOAD_TOO_LARGE');
+    assert.strictEqual(res.statusCode, 413);
+  });
+
+  await test('readNodeStream enforces body arrival timeout on stalled stream (Slowloris)', async () => {
+    const guard = new StreamLifecycleGuard();
+    let pushed = false;
+    const stalledStream = new Readable({
+      read() {
+        if (!pushed) {
+          pushed = true;
+          this.push(Buffer.from('{'));
+        }
+      }
+    });
+
+    const res = await guard.readNodeStream(stalledStream, { maxBytes: 1024, bodyTimeoutMs: 50 });
+    assert.strictEqual(res.success, false);
+    assert.strictEqual(res.errorCode, 'BODY_TIMEOUT');
+    assert.strictEqual(res.statusCode, 408);
+  });
+
+  await test('pumpSseStream pumps chunks and handles backpressure drain', async () => {
+    const guard = new StreamLifecycleGuard();
+    const encoder = new TextEncoder();
+    const chunksReceived: string[] = [];
+
+    const source = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(encoder.encode('event: message\ndata: hello\n\n'));
+        c.enqueue(encoder.encode('event: message\ndata: world\n\n'));
+        c.close();
+      }
+    });
+
+    const mockTarget = new EventEmitter() as any;
+    mockTarget.write = (chunk: Uint8Array) => {
+      chunksReceived.push(new TextDecoder().decode(chunk));
+      return true;
+    };
+    mockTarget.end = () => {};
+
+    await guard.pumpSseStream(source, mockTarget);
+    assert.strictEqual(chunksReceived.length, 2);
+    assert.ok(chunksReceived[0].includes('hello'));
+    assert.ok(chunksReceived[1].includes('world'));
+  });
+
+  await test('pumpSseStream instantly cancels reader and triggers onDisconnect when client disconnects (resolves #3148)', async () => {
+    const guard = new StreamLifecycleGuard();
+    let readerCancelled = false;
+    let disconnectReason = '';
+
+    const source = new ReadableStream<Uint8Array>({
+      start(c) {},
+      cancel(reason) {
+        readerCancelled = true;
+      }
+    });
+
+    const mockTarget = new EventEmitter() as any;
+    mockTarget.write = () => true;
+    mockTarget.end = () => {};
+
+    const pumpPromise = guard.pumpSseStream(source, mockTarget, {
+      onDisconnect: (reason) => {
+        disconnectReason = reason;
+      }
+    });
+
+    mockTarget.emit('close');
+    await pumpPromise;
+
+    assert.strictEqual(readerCancelled, true);
+    assert.ok(disconnectReason.includes('Client socket disconnected'));
+  });
+
+  await test('StreamLifecycleGuard telemetry tracks reads, timeouts and instant disconnects', async () => {
+    const guard = new StreamLifecycleGuard();
+    const encoder = new TextEncoder();
+
+    const s1 = new ReadableStream<Uint8Array>({
+      start(c) { c.enqueue(encoder.encode('{"ok":true}')); c.close(); }
+    });
+    await guard.readWebStream(s1);
+
+    const s2 = new ReadableStream<Uint8Array>({
+      start(c) { c.enqueue(encoder.encode('{')); }
+    });
+    await guard.readWebStream(s2, { bodyTimeoutMs: 20 });
+
+    const tel = guard.getTelemetry();
+    assert.strictEqual(tel.totalReads, 2);
+    assert.strictEqual(tel.successfulReads, 1);
+    assert.strictEqual(tel.timedOutReads, 1);
   });
 
   // Summary
