@@ -27,6 +27,7 @@
 | **Container Support** | Standard Dockerfile | **Production Docker Compose (Fly.io / Railway / AWS)** |
 | **JSON-RPC Dispatching** | Standard Dispatcher | **O(1) Fast-Path Classifier bypassing union walks** |
 | **64-Bit Integer Codec** | IEEE 754 Number | **Lossless BigInt & Raw JSON Token Reviver** |
+| **HTTP Stream & Slowloris Guard** | - | **Arrival deadlines (408), byte limits (413), instant SSE teardown** |
 | **Commercial Distribution** | Free under MIT License | **Commercial License + Instant ZIP Download** |
 
 ---
@@ -134,8 +135,9 @@ docker run -p 3000:3000 -e TRANSPORT=sse mcp-production-kit
 
 ## Commercial Pro Pack ($19 One-Time)
 
-For production cloud deployments, multi-agent frameworks, and enterprise teams, the **Pro Pack** provides drop-in, battle-tested extensions with 135 dedicated automated unit tests (149 total across the project):
+For production cloud deployments, multi-agent frameworks, and enterprise teams, the **Pro Pack** provides drop-in, battle-tested extensions with 145 dedicated automated unit tests (159 total across the project):
 
+* **HTTP & SSE Stream Lifecycle Guard & Slowloris Defense:** Enforces streaming body arrival deadlines (408) and byte size ceilings (413) on incoming HTTP POST requests (typescript-sdk #3131), and instantly cancels idle stream reader locks on client socket disconnects, clearing session registrations in <2ms and eliminating 409 Conflict reconnect lockouts (typescript-sdk #3148).
 * **Zero-Overhead JSON-RPC Message Classifier & Fast-Path Dispatcher:** Eliminates redundant Zod union schema walks and backtracking bottlenecks on high-throughput transports (typescript-sdk #3189 & #3190) via $O(1)$ envelope key discrimination, supporting single and batch RPC payloads with microsecond dispatching.
 * **Lossless 64-Bit Integer & BigInt Codec:** Prevents precision corruption on 64-bit integers (PostgreSQL `BIGINT`, Discord/Twitter Snowflakes, nanosecond timestamps, micro-units) exceeding `Number.MAX_SAFE_INTEGER` (`9,007,199,254,740,991`), eliminates `TypeError: Do not know how to serialize a BigInt` in tool responses, and guarantees bit-for-bit round-trip fidelity.
 * **Self-Healing Input Validator & RFC 9457 Formatter:** Coerces primitive strings emitted by LLMs (`"42"` -> `42`, `"true"` -> `true`, stringified JSON), replaces prose errors with structured RFC 9457 `structuredContent` and actionable missing/received argument diffs, preventing agents from burning reasoning loops.
@@ -151,7 +153,7 @@ For production cloud deployments, multi-agent frameworks, and enterprise teams, 
 * **Cloudflare Workers & Docker Compose:** Serverless edge hosting with streaming SSE, plus unprivileged non-root container deployment.
 
 **[Get Pro Pack ($19.00 USD) — Instant Checkout on Whop](https://whop.com/checkout/plan_eiKHeRpooY3yc)**  
-*(Delivery: Instant download of `mcp-pro-pack-v2.1.0.zip` via Whop Files and customer billing portal upon completion).*
+*(Delivery: Instant download of `mcp-pro-pack-v2.2.0.zip` via Whop Files and customer billing portal upon completion).*
 
 ---
 
