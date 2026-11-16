@@ -62,6 +62,11 @@ import {
   isUnsafeIntegerString,
   wrapToolResultWithExactNumbers
 } from '../pro_pack/lossless_json.ts';
+import {
+  classifyJsonRpcMessage,
+  classifyJsonRpcPayload,
+  FastPathDispatcher
+} from '../pro_pack/message_classifier.ts';
 
 let passed = 0;
 let failed = 0;
@@ -1328,6 +1333,136 @@ async function runProPackTestSuite() {
     assert.ok(wrapped.content[0].text.includes('9223372036854775807'));
     assert.ok(wrapped.content[0].text.includes('1716382910123456789'));
     assert.strictEqual(wrapped.structuredContent.recordId, 9223372036854775807n);
+  });
+
+  // --------------------------------------------------------------------------
+  // Module 13: Zero-Overhead JSON-RPC Message Classifier & Fast-Path Dispatcher
+  // --------------------------------------------------------------------------
+  console.log('\n[Module: Zero-Overhead JSON-RPC Message Classifier & Fast-Path Dispatcher]');
+
+  await test('classifyJsonRpcMessage classifies valid JSON-RPC request with string id', () => {
+    const raw = { jsonrpc: '2.0', id: 'call-1', method: 'tools/call', params: { name: 'echo' } };
+    const msg = classifyJsonRpcMessage(raw);
+    assert.strictEqual(msg.kind, 'request');
+    assert.strictEqual(msg.id, 'call-1');
+    assert.strictEqual(msg.method, 'tools/call');
+    assert.deepStrictEqual(msg.params, { name: 'echo' });
+  });
+
+  await test('classifyJsonRpcMessage classifies valid JSON-RPC request with numeric id', () => {
+    const raw = { jsonrpc: '2.0', id: 42, method: 'tools/list' };
+    const msg = classifyJsonRpcMessage(raw);
+    assert.strictEqual(msg.kind, 'request');
+    assert.strictEqual(msg.id, 42);
+    assert.strictEqual(msg.method, 'tools/list');
+  });
+
+  await test('classifyJsonRpcMessage classifies valid JSON-RPC notification without id', () => {
+    const raw = { jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 42 } };
+    const msg = classifyJsonRpcMessage(raw);
+    assert.strictEqual(msg.kind, 'notification');
+    assert.strictEqual(msg.id, undefined);
+    assert.strictEqual(msg.method, 'notifications/cancelled');
+  });
+
+  await test('classifyJsonRpcMessage classifies valid JSON-RPC success response with result', () => {
+    const raw = { jsonrpc: '2.0', id: 10, result: { content: [{ type: 'text', text: 'ok' }] } };
+    const msg = classifyJsonRpcMessage(raw);
+    assert.strictEqual(msg.kind, 'success_response');
+    assert.strictEqual(msg.id, 10);
+    assert.deepStrictEqual(msg.result, { content: [{ type: 'text', text: 'ok' }] });
+  });
+
+  await test('classifyJsonRpcMessage classifies valid JSON-RPC error response with code and message', () => {
+    const raw = { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Invalid Request', data: { detail: 'corrupt' } } };
+    const msg = classifyJsonRpcMessage(raw);
+    assert.strictEqual(msg.kind, 'error_response');
+    assert.strictEqual(msg.id, null);
+    assert.strictEqual(msg.error?.code, -32600);
+    assert.strictEqual(msg.error?.message, 'Invalid Request');
+    assert.deepStrictEqual(msg.error?.data, { detail: 'corrupt' });
+  });
+
+  await test('classifyJsonRpcMessage rejects non-object or null input as invalid', () => {
+    assert.strictEqual(classifyJsonRpcMessage(null).kind, 'invalid');
+    assert.strictEqual(classifyJsonRpcMessage('string').kind, 'invalid');
+    assert.strictEqual(classifyJsonRpcMessage(123).kind, 'invalid');
+  });
+
+  await test('classifyJsonRpcMessage rejects missing or incorrect jsonrpc version', () => {
+    assert.strictEqual(classifyJsonRpcMessage({ id: 1, method: 'test' }).kind, 'invalid');
+    assert.strictEqual(classifyJsonRpcMessage({ jsonrpc: '1.0', id: 1, method: 'test' }).kind, 'invalid');
+  });
+
+  await test('classifyJsonRpcMessage rejects request with invalid id type (e.g. object or boolean)', () => {
+    assert.strictEqual(classifyJsonRpcMessage({ jsonrpc: '2.0', id: { bad: true }, method: 'test' }).kind, 'invalid');
+    assert.strictEqual(classifyJsonRpcMessage({ jsonrpc: '2.0', id: true, method: 'test' }).kind, 'invalid');
+  });
+
+  await test('classifyJsonRpcMessage rejects response with invalid id (e.g. array)', () => {
+    assert.strictEqual(classifyJsonRpcMessage({ jsonrpc: '2.0', id: [1, 2], result: {} }).kind, 'invalid');
+  });
+
+  await test('classifyJsonRpcMessage rejects empty method string', () => {
+    assert.strictEqual(classifyJsonRpcMessage({ jsonrpc: '2.0', id: 1, method: '' }).kind, 'invalid');
+  });
+
+  await test('classifyJsonRpcPayload parses batch array with mixed requests and notifications', () => {
+    const batch = [
+      { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+      { jsonrpc: '2.0', method: 'notifications/initialized' },
+      { jsonrpc: '2.0', id: 2, result: { tools: [] } }
+    ];
+    const msgs = classifyJsonRpcPayload(batch);
+    assert.strictEqual(msgs.length, 3);
+    assert.strictEqual(msgs[0].kind, 'request');
+    assert.strictEqual(msgs[1].kind, 'notification');
+    assert.strictEqual(msgs[2].kind, 'success_response');
+  });
+
+  await test('classifyJsonRpcPayload rejects empty batch array as invalid', () => {
+    const msgs = classifyJsonRpcPayload([]);
+    assert.strictEqual(msgs.length, 1);
+    assert.strictEqual(msgs[0].kind, 'invalid');
+  });
+
+  await test('FastPathDispatcher routes requests and notifications cleanly', async () => {
+    const dispatcher = new FastPathDispatcher();
+    let reqRan = false;
+    let notifRan = false;
+
+    await dispatcher.dispatch(
+      { jsonrpc: '2.0', id: 1, method: 'tools/call' },
+      {
+        onRequest: () => { reqRan = true; return 'req_ok'; },
+        onNotification: () => { notifRan = true; }
+      },
+      {}
+    );
+    assert.strictEqual(reqRan, true);
+
+    await dispatcher.dispatch(
+      { jsonrpc: '2.0', method: 'notifications/progress' },
+      {
+        onRequest: () => {},
+        onNotification: () => { notifRan = true; }
+      },
+      {}
+    );
+    assert.strictEqual(notifRan, true);
+  });
+
+  await test('FastPathDispatcher tracks performance metrics and latency', async () => {
+    const dispatcher = new FastPathDispatcher();
+    await dispatcher.dispatch({ jsonrpc: '2.0', id: 1, method: 'm1' }, { onRequest: () => 1, onNotification: () => {} }, {});
+    await dispatcher.dispatch({ jsonrpc: '2.0', id: 2, method: 'm2' }, { onRequest: () => 2, onNotification: () => {} }, {});
+    await dispatcher.dispatch({ jsonrpc: '2.0', method: 'n1' }, { onRequest: () => {}, onNotification: () => {} }, {});
+
+    const metrics = dispatcher.getMetrics();
+    assert.strictEqual(metrics.totalProcessed, 3);
+    assert.strictEqual(metrics.requestsCount, 2);
+    assert.strictEqual(metrics.notificationsCount, 1);
+    assert.ok(metrics.averageLatencyNs >= 0);
   });
 
   // Summary
