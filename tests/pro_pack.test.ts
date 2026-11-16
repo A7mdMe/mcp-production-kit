@@ -71,6 +71,16 @@ import {
   StreamLifecycleGuard,
   defaultStreamLifecycleGuard
 } from '../pro_pack/stream_lifecycle_guard.ts';
+import {
+  resolveWithin,
+  safeWriteFile,
+  safeReadFile,
+  sanitizeRelativePath,
+  PathTraversalError
+} from '../pro_pack/filesystem_guard.ts';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { Readable } from 'node:stream';
 import { EventEmitter } from 'node:events';
 
@@ -1680,6 +1690,112 @@ async function runProPackTestSuite() {
     assert.strictEqual(tel.totalReads, 2);
     assert.strictEqual(tel.successfulReads, 1);
     assert.strictEqual(tel.timedOutReads, 1);
+  });
+
+  // =========================================================================
+  // Module 16: Filesystem Containment, Path Traversal Defense & Atomic Safe I/O
+  // =========================================================================
+  console.log('\n[Module: Filesystem Containment, Path Traversal Defense & Atomic I/O]');
+
+  const testTempRoot = path.join(os.tmpdir(), `mcp_fs_test_${Date.now()}`);
+  fs.mkdirSync(testTempRoot, { recursive: true });
+
+  await test('resolveWithin resolves safe relative subpaths within workspace root', () => {
+    const resolved = resolveWithin(testTempRoot, 'data/report.json');
+    assert.strictEqual(resolved, path.resolve(testTempRoot, 'data', 'report.json'));
+  });
+
+  await test('resolveWithin handles nested directories and clean relative tokens', () => {
+    const resolved = resolveWithin(testTempRoot, './sub/dir/../file.txt');
+    assert.strictEqual(resolved, path.resolve(testTempRoot, 'sub', 'file.txt'));
+  });
+
+  await test('resolveWithin blocks directory traversal escape vectors (../../etc/passwd)', () => {
+    assert.throws(() => {
+      resolveWithin(testTempRoot, '../../../../etc/passwd');
+    }, (err: any) => {
+      return err instanceof PathTraversalError && err.code === 'PATH_TRAVERSAL_DETECTED';
+    });
+  });
+
+  await test('resolveWithin blocks sibling directory breakout prefix bypass', () => {
+    const fakeRoot = path.join(testTempRoot, 'workspace');
+    fs.mkdirSync(fakeRoot, { recursive: true });
+
+    assert.throws(() => {
+      resolveWithin(fakeRoot, '../workspace_evil/payload.sh');
+    }, (err: any) => {
+      return err instanceof PathTraversalError;
+    });
+  });
+
+  await test('resolveWithin strips leading drive letters and absolute slashes to prevent escape', () => {
+    const resolvedPosix = resolveWithin(testTempRoot, '/etc/shadow');
+    assert.strictEqual(resolvedPosix, path.resolve(testTempRoot, 'etc', 'shadow'));
+  });
+
+  await test('resolveWithin rejects null byte injection attempts', () => {
+    assert.throws(() => {
+      resolveWithin(testTempRoot, 'safe.txt\0/../../root');
+    }, (err: any) => {
+      return err instanceof PathTraversalError && err.message.includes('Null byte');
+    });
+  });
+
+  await test('resolveWithin blocks access to Windows DOS reserved device names (CON, NUL, AUX)', () => {
+    assert.throws(() => {
+      resolveWithin(testTempRoot, 'con.txt');
+    }, (err: any) => {
+      return err instanceof PathTraversalError && err.message.includes('reserved system device');
+    });
+
+    assert.throws(() => {
+      resolveWithin(testTempRoot, 'sub/nul');
+    }, (err: any) => {
+      return err instanceof PathTraversalError && err.message.includes('reserved system device');
+    });
+  });
+
+  await test('resolveWithin blocks sensitive configured files (.env, authorized_keys, id_rsa)', () => {
+    const opts = { blockedFileNames: ['.env', 'authorized_keys', 'id_rsa'] };
+    assert.throws(() => {
+      resolveWithin(testTempRoot, '.env', opts);
+    }, (err: any) => {
+      return err instanceof PathTraversalError && err.message.includes('blocked by security policy');
+    });
+
+    assert.throws(() => {
+      resolveWithin(testTempRoot, 'sub/nested/id_rsa', opts);
+    }, (err: any) => {
+      return err instanceof PathTraversalError && err.message.includes('blocked by security policy');
+    });
+  });
+
+  await test('resolveWithin blocks hidden files when blockHiddenFiles is enabled', () => {
+    assert.throws(() => {
+      resolveWithin(testTempRoot, '.secret_config', { blockHiddenFiles: true });
+    }, (err: any) => {
+      return err instanceof PathTraversalError && err.message.includes('hidden path segment');
+    });
+  });
+
+  await test('safeWriteFile writes atomically and safeReadFile retrieves content', async () => {
+    const writeResult = await safeWriteFile(testTempRoot, 'reports/2026/audit.txt', 'audit-log-content');
+    assert.strictEqual(writeResult.bytesWritten, 'audit-log-content'.length);
+    assert.ok(fs.existsSync(writeResult.resolvedPath));
+
+    const readResult = await safeReadFile(testTempRoot, 'reports/2026/audit.txt');
+    assert.strictEqual(readResult.text, 'audit-log-content');
+  });
+
+  await test('PathTraversalError formats valid JSON-RPC 2.0 -32602 error envelope', () => {
+    const err = new PathTraversalError('Path traversal detected', '../../escape.sh', testTempRoot);
+    const rpc = err.toJsonRpcError('req-99');
+    assert.strictEqual(rpc.jsonrpc, '2.0');
+    assert.strictEqual(rpc.id, 'req-99');
+    assert.strictEqual(rpc.error.code, -32602);
+    assert.strictEqual(rpc.error.data.code, 'PATH_TRAVERSAL_DETECTED');
+    assert.strictEqual(rpc.error.data.attemptedPath, '../../escape.sh');
   });
 
   // Summary
