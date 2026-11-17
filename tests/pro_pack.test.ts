@@ -85,6 +85,11 @@ import {
   calculateBackoffDelay,
   SseTeardownError
 } from '../pro_pack/sse_reconnect_guard.ts';
+import {
+  TransportEpochFence,
+  reapProcessTree,
+  wrapClientWithLifecycleGuard
+} from '../pro_pack/stdio_lifecycle_guard.ts';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -1968,6 +1973,274 @@ async function runProPackTestSuite() {
     });
 
     assert.strictEqual(closeCalled, true);
+  });
+
+  console.log('\n[Module: Stdio Lifecycle, Monotonic Epoch Fence & Subprocess Reaper]');
+
+  await test('TransportEpochFence advances epoch monotonically on each fenced transport', () => {
+    const fence = new TransportEpochFence();
+    assert.strictEqual(fence.getActiveEpoch(), 0);
+
+    const t1: any = { close: async () => {} };
+    fence.fenceTransport(t1);
+    assert.strictEqual(fence.getActiveEpoch(), 1);
+
+    const t2: any = { close: async () => {} };
+    fence.fenceTransport(t2);
+    assert.strictEqual(fence.getActiveEpoch(), 2);
+  });
+
+  await test('TransportEpochFence suppresses stale onclose from a previous epoch (resolves #3194)', () => {
+    const fence = new TransportEpochFence();
+    let originalCloseCalled = false;
+    let suppressedEvent: any = null;
+    fence.on('stale_event_suppressed', (info) => { suppressedEvent = info; });
+
+    const t1: any = {
+      close: async () => {},
+      onclose: () => { originalCloseCalled = true; }
+    };
+    fence.fenceTransport(t1);
+
+    const t2: any = { close: async () => {} };
+    fence.fenceTransport(t2); // advances to epoch 2
+
+    // Now t1 emits close event (late exit from old child process)
+    t1.onclose();
+
+    assert.strictEqual(originalCloseCalled, false);
+    assert.ok(suppressedEvent);
+    assert.strictEqual(suppressedEvent.staleEpoch, 1);
+    assert.strictEqual(suppressedEvent.activeEpoch, 2);
+    assert.strictEqual(suppressedEvent.eventType, 'close');
+  });
+
+  await test('TransportEpochFence suppresses stale onerror from a previous epoch', () => {
+    const fence = new TransportEpochFence();
+    let originalErrorCalled = false;
+    let suppressedEvent: any = null;
+    fence.on('stale_event_suppressed', (info) => { suppressedEvent = info; });
+
+    const t1: any = {
+      close: async () => {},
+      onerror: () => { originalErrorCalled = true; }
+    };
+    fence.fenceTransport(t1);
+
+    const t2: any = { close: async () => {} };
+    fence.fenceTransport(t2);
+
+    t1.onerror(new Error('Old connection reset'));
+
+    assert.strictEqual(originalErrorCalled, false);
+    assert.ok(suppressedEvent);
+    assert.strictEqual(suppressedEvent.eventType, 'error');
+  });
+
+  await test('TransportEpochFence suppresses stale onmessage from a previous epoch', () => {
+    const fence = new TransportEpochFence();
+    let originalMsgCalled = false;
+    let suppressedEvent: any = null;
+    fence.on('stale_event_suppressed', (info) => { suppressedEvent = info; });
+
+    const t1: any = {
+      close: async () => {},
+      onmessage: () => { originalMsgCalled = true; }
+    };
+    fence.fenceTransport(t1);
+
+    const t2: any = { close: async () => {} };
+    fence.fenceTransport(t2);
+
+    t1.onmessage({ jsonrpc: '2.0', result: 'stale' });
+
+    assert.strictEqual(originalMsgCalled, false);
+    assert.ok(suppressedEvent);
+    assert.strictEqual(suppressedEvent.eventType, 'message');
+  });
+
+  await test('TransportEpochFence allows active epoch events to trigger original handlers', () => {
+    const fence = new TransportEpochFence();
+    let closeFired = false;
+    let errorFired = false;
+    let messageFired = false;
+
+    const t1: any = {
+      close: async () => {},
+      onclose: () => { closeFired = true; },
+      onerror: (err: any) => { errorFired = true; },
+      onmessage: (msg: any) => { messageFired = true; }
+    };
+
+    fence.fenceTransport(t1);
+    t1.onmessage('hello');
+    t1.onerror(new Error('active err'));
+    t1.onclose();
+
+    assert.strictEqual(messageFired, true);
+    assert.strictEqual(errorFired, true);
+    assert.strictEqual(closeFired, true);
+  });
+
+  await test('connectWithFence awaits transport.close() before rethrowing on failed handshake', async () => {
+    const fence = new TransportEpochFence();
+    let closeSettled = false;
+    let closeFinishedBeforeRethrow = false;
+
+    const mockTransport: any = {
+      close: async () => {
+        await new Promise((r) => setTimeout(r, 20));
+        closeSettled = true;
+      }
+    };
+
+    const mockClient: any = {
+      connect: async () => {
+        throw new Error('Unsupported protocol version: 1999-01-01');
+      }
+    };
+
+    try {
+      await fence.connectWithFence(mockClient, () => mockTransport);
+      assert.fail('Should have thrown');
+    } catch (err: any) {
+      closeFinishedBeforeRethrow = closeSettled;
+      assert.ok(err.message.includes('Unsupported protocol version'));
+    }
+
+    assert.strictEqual(closeFinishedBeforeRethrow, true);
+  });
+
+  await test('connectWithFence disarms client.transport so stale transport is not visible in catch block', async () => {
+    const fence = new TransportEpochFence();
+    const mockTransport: any = {
+      close: async () => {}
+    };
+
+    const mockClient: any = {
+      transport: undefined,
+      connect: async (t: any) => {
+        mockClient.transport = t;
+        throw new Error('Handshake rejected');
+      }
+    };
+
+    let observedTransportInCatch: any = 'UNCHECKED';
+
+    try {
+      await fence.connectWithFence(mockClient, () => mockTransport);
+    } catch (err) {
+      observedTransportInCatch = mockClient.transport;
+    }
+
+    assert.strictEqual(observedTransportInCatch, undefined);
+  });
+
+  await test('Simulated #3194 reproduction: Retried connect succeeds despite late exit event from first child', async () => {
+    const fence = new TransportEpochFence();
+
+    let activeClientTransport: any = undefined;
+    let inFlightHandshakeCancelled = false;
+
+    const mockClient: any = {
+      get transport() {
+        return activeClientTransport;
+      },
+      set transport(t) {
+        activeClientTransport = t;
+      },
+      close: async () => {
+        if (activeClientTransport) await activeClientTransport.close();
+      }
+    };
+
+    const t1: any = {
+      close: async () => {
+        setTimeout(() => {
+          if (t1.onclose) t1.onclose();
+        }, 15);
+      }
+    };
+
+    let connect1Failed = false;
+    try {
+      await fence.connectWithFence(mockClient, () => {
+        t1.onclose = () => {
+          activeClientTransport = undefined;
+          inFlightHandshakeCancelled = true;
+        };
+        return t1;
+      });
+    } catch {
+      connect1Failed = true;
+    }
+
+    assert.strictEqual(connect1Failed, true);
+
+    let t2Connected = false;
+    const t2: any = {
+      close: async () => {}
+    };
+
+    await fence.connectWithFence(mockClient, () => {
+      mockClient.connect = async (t: any) => {
+        mockClient.transport = t;
+        await new Promise((r) => setTimeout(r, 25));
+        if (inFlightHandshakeCancelled) {
+          throw new Error('CONNECTION_CLOSED Connection closed');
+        }
+        t2Connected = true;
+      };
+      return t2;
+    });
+
+    assert.strictEqual(t2Connected, true);
+    assert.strictEqual(inFlightHandshakeCancelled, false);
+  });
+
+  await test('connectWithFailover walks candidates sequentially and settles on working candidate', async () => {
+    const fence = new TransportEpochFence({ retryDelayMs: 5 });
+    const mockClient: any = {
+      connect: async (t: any) => {
+        if (t.isBad) throw new Error('Bad transport');
+      }
+    };
+
+    const res = await fence.connectWithFailover(mockClient, [
+      () => ({ isBad: true, close: async () => {} } as any),
+      () => ({ isBad: true, close: async () => {} } as any),
+      () => ({ isBad: false, close: async () => {} } as any)
+    ]);
+
+    assert.strictEqual(res.attempts, 3);
+    assert.strictEqual(res.successfulIndex, 2);
+  });
+
+  await test('reapProcessTree handles non-existent or 0 PID cleanly without throwing', async () => {
+    const res1 = await reapProcessTree(0);
+    assert.strictEqual(res1, true);
+
+    const res2 = await reapProcessTree(-1);
+    assert.strictEqual(res2, true);
+
+    const res3 = await reapProcessTree(999999);
+    assert.strictEqual(res3, true);
+  });
+
+  await test('wrapClientWithLifecycleGuard exposes working helper bundle', async () => {
+    const mockClient: any = {
+      connect: async () => {},
+      close: async () => {}
+    };
+
+    const bundle = wrapClientWithLifecycleGuard(mockClient);
+    assert.ok(bundle.client);
+    assert.ok(bundle.fence instanceof TransportEpochFence);
+    assert.strictEqual(typeof bundle.connectSafely, 'function');
+    assert.strictEqual(typeof bundle.connectWithFailover, 'function');
+
+    await bundle.connectSafely(() => ({ close: async () => {} }));
+    assert.strictEqual(bundle.fence.getActiveEpoch(), 1);
   });
 
   // Summary
