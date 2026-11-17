@@ -136,7 +136,7 @@ docker run -p 3000:3000 -e TRANSPORT=sse mcp-production-kit
 
 ## Commercial Pro Pack ($19 One-Time)
 
-For production cloud deployments, multi-agent frameworks, and enterprise teams, the **Pro Pack** provides drop-in, battle-tested extensions with 156 dedicated automated unit tests (170 total across the project):
+For production cloud deployments, multi-agent frameworks, and enterprise teams, the **Pro Pack** provides drop-in, battle-tested extensions with 158 dedicated automated unit tests (172 total across the project):
 
 * **Filesystem Containment & Path Traversal Guard:** Strictly bounds LLM-generated file writes to designated workspace roots via strict `path.relative` containment, eliminates sibling directory prefix-bypass vulnerabilities (typescript-sdk #3191), blocks Windows DOS device names (`CON`/`NUL`/`AUX`) and null bytes, prevents symlink escapes, and performs atomic file writes via temporary files.
 * **HTTP & SSE Stream Lifecycle Guard & Slowloris Defense:** Enforces streaming body arrival deadlines (408) and byte size ceilings (413) on incoming HTTP POST requests (typescript-sdk #3131), and instantly cancels idle stream reader locks on client socket disconnects, clearing session registrations in <2ms and eliminating 409 Conflict reconnect lockouts (typescript-sdk #3148).
@@ -155,7 +155,7 @@ For production cloud deployments, multi-agent frameworks, and enterprise teams, 
 * **Cloudflare Workers & Docker Compose:** Serverless edge hosting with streaming SSE, plus unprivileged non-root container deployment.
 
 **[Get Pro Pack ($19.00 USD) — Instant Checkout on Whop](https://whop.com/checkout/plan_eiKHeRpooY3yc)**  
-*(Delivery: Instant download of `mcp-pro-pack-v2.3.0.zip` via Whop Files and customer billing portal upon completion).*
+*(Delivery: Instant download of `mcp-pro-pack-v2.3.1.zip` via Whop Files and customer billing portal upon completion).*
 
 ---
 
