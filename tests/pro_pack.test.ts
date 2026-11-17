@@ -1729,9 +1729,23 @@ async function runProPackTestSuite() {
     });
   });
 
-  await test('resolveWithin strips leading drive letters and absolute slashes to prevent escape', () => {
-    const resolvedPosix = resolveWithin(testTempRoot, '/etc/shadow');
-    assert.strictEqual(resolvedPosix, path.resolve(testTempRoot, 'etc', 'shadow'));
+  await test('resolveWithin strictly rejects absolute paths by default to surface injection signals', () => {
+    assert.throws(() => {
+      resolveWithin(testTempRoot, '/etc/shadow');
+    }, (err: any) => {
+      return err instanceof PathTraversalError && err.message.includes('Absolute path escape rejected');
+    });
+
+    assert.throws(() => {
+      resolveWithin(testTempRoot, 'C:\\Windows\\System32\\cmd.exe');
+    }, (err: any) => {
+      return err instanceof PathTraversalError && err.message.includes('Absolute path escape rejected');
+    });
+  });
+
+  await test('resolveWithin supports opt-in absolute path remapping when rejectAbsolute is false', () => {
+    const remapped = resolveWithin(testTempRoot, '/etc/shadow', { rejectAbsolute: false });
+    assert.strictEqual(remapped, path.resolve(testTempRoot, 'etc', 'shadow'));
   });
 
   await test('resolveWithin rejects null byte injection attempts', () => {
@@ -1742,18 +1756,53 @@ async function runProPackTestSuite() {
     });
   });
 
-  await test('resolveWithin blocks access to Windows DOS reserved device names (CON, NUL, AUX)', () => {
+  await test('resolveWithin blocks Windows DOS reserved device names across all segments and superscripts', () => {
+    // Basename check
     assert.throws(() => {
       resolveWithin(testTempRoot, 'con.txt');
     }, (err: any) => {
       return err instanceof PathTraversalError && err.message.includes('reserved system device');
     });
 
+    // Directory component check (e.g. CON/x.txt)
     assert.throws(() => {
-      resolveWithin(testTempRoot, 'sub/nul');
+      resolveWithin(testTempRoot, 'CON/sub_report.txt');
     }, (err: any) => {
       return err instanceof PathTraversalError && err.message.includes('reserved system device');
     });
+
+    // Nested directory component check (e.g. data/NUL/record.bin)
+    assert.throws(() => {
+      resolveWithin(testTempRoot, 'data/nul/record.bin');
+    }, (err: any) => {
+      return err instanceof PathTraversalError && err.message.includes('reserved system device');
+    });
+
+    // ISO 8859-1 superscript form (COM¹ / LPT²)
+    assert.throws(() => {
+      resolveWithin(testTempRoot, 'com\u00B9.log');
+    }, (err: any) => {
+      return err instanceof PathTraversalError && err.message.includes('reserved system device');
+    });
+  });
+
+  await test('resolveWithin blocks symlink escape when ancestor directory is linked outside root', () => {
+    const outsideTarget = path.join(os.tmpdir(), `mcp_outside_${Date.now()}`);
+    fs.mkdirSync(outsideTarget, { recursive: true });
+
+    const symlinkDir = path.join(testTempRoot, 'shared_symlink');
+    try {
+      fs.symlinkSync(outsideTarget, symlinkDir, 'junction');
+
+      assert.throws(() => {
+        resolveWithin(testTempRoot, 'shared_symlink/authorized_keys');
+      }, (err: any) => {
+        return err instanceof PathTraversalError && err.message.includes('Symlink boundary escape detected');
+      });
+    } catch (e: any) {
+      // If OS requires elevated privileges for symlinks (non-admin Windows), skip silently
+      if (e.code !== 'EPERM') throw e;
+    }
   });
 
   await test('resolveWithin blocks sensitive configured files (.env, authorized_keys, id_rsa)', () => {
