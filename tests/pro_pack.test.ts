@@ -78,6 +78,13 @@ import {
   sanitizeRelativePath,
   PathTraversalError
 } from '../pro_pack/filesystem_guard.ts';
+import {
+  ResilientSseClientController,
+  wrapTransportWithTeardownGuard,
+  isNonRetryableError,
+  calculateBackoffDelay,
+  SseTeardownError
+} from '../pro_pack/sse_reconnect_guard.ts';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -1845,6 +1852,122 @@ async function runProPackTestSuite() {
     assert.strictEqual(rpc.error.code, -32602);
     assert.strictEqual(rpc.error.data.code, 'PATH_TRAVERSAL_DETECTED');
     assert.strictEqual(rpc.error.data.attemptedPath, '../../escape.sh');
+  });
+
+  // =========================================================================
+  // Module 17: Resilient SSE Reconnect & Handshake Teardown Guard
+  // =========================================================================
+  console.log('\n[Module: Resilient SSE Reconnect & Handshake Teardown Guard]');
+
+  await test('calculateBackoffDelay calculates bounded exponential delays', () => {
+    const d1 = calculateBackoffDelay(1, 500, 10000, 2.0, false);
+    const d2 = calculateBackoffDelay(2, 500, 10000, 2.0, false);
+    const d3 = calculateBackoffDelay(3, 500, 10000, 2.0, false);
+    const d10 = calculateBackoffDelay(10, 500, 5000, 2.0, false);
+
+    assert.strictEqual(d1, 500);
+    assert.strictEqual(d2, 1000);
+    assert.strictEqual(d3, 2000);
+    assert.strictEqual(d10, 5000);
+  });
+
+  await test('isNonRetryableError correctly identifies permanent HTTP status codes', () => {
+    assert.strictEqual(isNonRetryableError({ status: 401 }), true);
+    assert.strictEqual(isNonRetryableError({ statusCode: 403 }), true);
+    assert.strictEqual(isNonRetryableError({ status_code: 404 }), true);
+    assert.strictEqual(isNonRetryableError(new Error('Unauthorized access')), true);
+    assert.strictEqual(isNonRetryableError(new Error('ECONNREFUSED 127.0.0.1')), false);
+    assert.strictEqual(isNonRetryableError({ status: 503 }), false);
+  });
+
+  await test('connectWithGuard completes successfully on clean connection', async () => {
+    const controller = new ResilientSseClientController();
+    let closed = false;
+    const mockSource = { close: () => { closed = true; } };
+
+    const source = await controller.connectWithGuard(async () => mockSource);
+    assert.strictEqual(source, mockSource);
+    assert.strictEqual(closed, false);
+    controller.close();
+    assert.strictEqual(closed, true);
+  });
+
+  await test('connectWithGuard immediately closes EventSource when connect rejects (resolves #3193)', async () => {
+    const controller = new ResilientSseClientController();
+
+    await assert.rejects(async () => {
+      await controller.connectWithGuard(async () => {
+        throw new Error('TypeError: fetch failed: connect ECONNREFUSED');
+      });
+    });
+
+    assert.strictEqual(controller.isClosed(), false);
+    const tel = ResilientSseClientController.getTelemetry();
+    assert.ok(tel.handshakeFailuresHandled >= 1);
+  });
+
+  await test('connectWithGuard aborts and closes when handshake exceeds timeout', async () => {
+    const controller = new ResilientSseClientController({ handshakeTimeoutMs: 50 });
+
+    await assert.rejects(async () => {
+      await controller.connectWithGuard(() => {
+        return new Promise((resolve) => {
+          setTimeout(() => resolve({ close: () => {} }), 200);
+        });
+      });
+    }, (err: any) => {
+      return err instanceof SseTeardownError && err.message.includes('handshake timed out');
+    });
+  });
+
+  await test('handleStreamError terminates immediately on non-retryable 401 error', () => {
+    const controller = new ResilientSseClientController();
+    let retryScheduled = false;
+
+    const willRetry = controller.handleStreamError(new Error('401 Unauthorized'), () => {
+      retryScheduled = true;
+    });
+
+    assert.strictEqual(willRetry, false);
+    assert.strictEqual(retryScheduled, false);
+    assert.strictEqual(controller.isClosed(), true);
+  });
+
+  await test('handleStreamError terminates and exhausts retries at maxRetries limit', () => {
+    const controller = new ResilientSseClientController({ maxRetries: 2 });
+    let terminalErr: any = null;
+    controller.on('error', (err) => { terminalErr = err; });
+
+    const r1 = controller.handleStreamError(new Error('ECONNRESET'), () => {});
+    assert.strictEqual(r1, true);
+
+    const r2 = controller.handleStreamError(new Error('ECONNRESET'), () => {});
+    assert.strictEqual(r2, true);
+
+    const r3 = controller.handleStreamError(new Error('ECONNRESET'), () => {});
+    assert.strictEqual(r3, false);
+    assert.strictEqual(controller.isClosed(), true);
+    assert.ok(terminalErr instanceof SseTeardownError);
+    assert.strictEqual(terminalErr.isTerminal, true);
+  });
+
+  await test('wrapTransportWithTeardownGuard invokes close on rejected start', async () => {
+    let closeCalled = false;
+    const mockTransport = {
+      start: async () => {
+        throw new Error('SSE connect failed');
+      },
+      close: async () => {
+        closeCalled = true;
+      }
+    };
+
+    const guarded = wrapTransportWithTeardownGuard(mockTransport);
+    await assert.rejects(async () => {
+      await guarded.start();
+    });
+
+    assert.strictEqual(closeCalled, true);
   });
 
   // Summary
