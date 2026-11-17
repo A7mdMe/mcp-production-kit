@@ -29,6 +29,7 @@
 | **64-Bit Integer Codec** | IEEE 754 Number | **Lossless BigInt & Raw JSON Token Reviver** |
 | **HTTP Stream & Slowloris Guard** | - | **Arrival deadlines (408), byte limits (413), instant SSE teardown** |
 | **Filesystem & Traversal Guard** | - | **Boundary containment, prefix-bypass defense, atomic writes** |
+| **SSE Reconnect & Teardown Guard** | - | **Immediate close on handshake failure, bounds retry backoff** |
 | **Commercial Distribution** | Free under MIT License | **Commercial License + Instant ZIP Download** |
 
 ---
@@ -136,8 +137,9 @@ docker run -p 3000:3000 -e TRANSPORT=sse mcp-production-kit
 
 ## Commercial Pro Pack ($19 One-Time)
 
-For production cloud deployments, multi-agent frameworks, and enterprise teams, the **Pro Pack** provides drop-in, battle-tested extensions with 158 dedicated automated unit tests (172 total across the project):
+For production cloud deployments, multi-agent frameworks, and enterprise teams, the **Pro Pack** provides drop-in, battle-tested extensions with 166 dedicated automated unit tests (180 total across the project):
 
+* **Resilient SSE Reconnect & Handshake Teardown Guard:** Prevents client-side zombie connection leaks and background reconnect storms when connecting to MCP servers over SSE (typescript-sdk #3193). Guarantees immediate .close() execution on handshake rejection, bounds reconnection attempts with jittered exponential backoff, halts retries on terminal HTTP errors (401, 403, 404), and unrefs internal timers to guarantee clean process exit.
 * **Filesystem Containment & Path Traversal Guard:** Strictly bounds LLM-generated file writes to designated workspace roots via strict `path.relative` containment, eliminates sibling directory prefix-bypass vulnerabilities (typescript-sdk #3191), blocks Windows DOS device names (`CON`/`NUL`/`AUX`) and null bytes, prevents symlink escapes, and performs atomic file writes via temporary files.
 * **HTTP & SSE Stream Lifecycle Guard & Slowloris Defense:** Enforces streaming body arrival deadlines (408) and byte size ceilings (413) on incoming HTTP POST requests (typescript-sdk #3131), and instantly cancels idle stream reader locks on client socket disconnects, clearing session registrations in <2ms and eliminating 409 Conflict reconnect lockouts (typescript-sdk #3148).
 * **Zero-Overhead JSON-RPC Message Classifier & Fast-Path Dispatcher:** Eliminates redundant Zod union schema walks and backtracking bottlenecks on high-throughput transports (typescript-sdk #3189 & #3190) via $O(1)$ envelope key discrimination, supporting single and batch RPC payloads with microsecond dispatching.
@@ -155,7 +157,7 @@ For production cloud deployments, multi-agent frameworks, and enterprise teams, 
 * **Cloudflare Workers & Docker Compose:** Serverless edge hosting with streaming SSE, plus unprivileged non-root container deployment.
 
 **[Get Pro Pack ($19.00 USD) — Instant Checkout on Whop](https://whop.com/checkout/plan_eiKHeRpooY3yc)**  
-*(Delivery: Instant download of `mcp-pro-pack-v2.3.1.zip` via Whop Files and customer billing portal upon completion).*
+*(Delivery: Instant download of `mcp-pro-pack-v2.4.0.zip` via Whop Files and customer billing portal upon completion).*
 
 ---
 
