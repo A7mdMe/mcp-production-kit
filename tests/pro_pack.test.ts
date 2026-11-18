@@ -90,6 +90,11 @@ import {
   reapProcessTree,
   wrapClientWithLifecycleGuard
 } from '../pro_pack/stdio_lifecycle_guard.ts';
+import {
+  ClientSessionGuard,
+  ClientSessionError,
+  wrapClientWithSessionGuard
+} from '../pro_pack/client_session_guard.ts';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -2241,6 +2246,213 @@ async function runProPackTestSuite() {
 
     await bundle.connectSafely(() => ({ close: async () => {} }));
     assert.strictEqual(bundle.fence.getActiveEpoch(), 1);
+  });
+
+  console.log('\n[Module: Client Session & Fail-Closed Capability Invariant Guard]');
+
+  await test('ClientSessionGuard initializes with state DISCONNECTED', () => {
+    const guard = new ClientSessionGuard();
+    assert.strictEqual(guard.getState(), 'DISCONNECTED');
+    assert.strictEqual(guard.isConnected(), false);
+  });
+
+  await test('ClientSessionGuard transitions state across connecting, connected, closing, and closed', () => {
+    const guard = new ClientSessionGuard();
+    const transitions: string[] = [];
+    guard.on('state_change', (from, to) => transitions.push(`${from}->${to}`));
+
+    guard.markConnecting();
+    assert.strictEqual(guard.getState(), 'CONNECTING');
+
+    guard.markConnected();
+    assert.strictEqual(guard.getState(), 'CONNECTED');
+    assert.strictEqual(guard.isConnected(), true);
+
+    guard.markClosed();
+    assert.strictEqual(guard.getState(), 'CLOSED');
+    assert.strictEqual(guard.isConnected(), false);
+
+    assert.deepStrictEqual(transitions, [
+      'DISCONNECTED->CONNECTING',
+      'CONNECTING->CONNECTED',
+      'CONNECTED->CLOSED'
+    ]);
+  });
+
+  await test('assertConnected throws ClientSessionError with ERR_CLIENT_NOT_CONNECTED on disconnected client', () => {
+    const guard = new ClientSessionGuard();
+    const mockClient: any = { transport: undefined };
+
+    assert.throws(
+      () => guard.assertConnected(mockClient, 'listTools'),
+      (err: any) => {
+        assert.ok(err instanceof ClientSessionError);
+        assert.strictEqual(err.code, 'ERR_CLIENT_NOT_CONNECTED');
+        assert.strictEqual(err.message, 'Not connected');
+        assert.strictEqual(err.method, 'listTools');
+        return true;
+      }
+    );
+  });
+
+  await test('assertConnected passes without error when client.transport is defined and state is CONNECTED', () => {
+    const guard = new ClientSessionGuard();
+    guard.markConnected();
+    const mockClient: any = { transport: {} };
+
+    assert.doesNotThrow(() => {
+      guard.assertConnected(mockClient, 'listTools');
+    });
+  });
+
+  await test('guardClient intercepts listTools() on a closed client and rejects with Not connected (resolves #3195)', async () => {
+    const guard = new ClientSessionGuard();
+    const rawClient: any = {
+      transport: undefined,
+      _serverCapabilities: undefined,
+      listTools: async () => {
+        // SDK behavior without guard: returns empty tools array
+        return { tools: [] };
+      },
+      close: async () => {}
+    };
+
+    const client = guard.guardClient(rawClient);
+    guard.markClosed();
+
+    await assert.rejects(
+      async () => await client.listTools(),
+      (err: any) => {
+        assert.ok(err instanceof ClientSessionError);
+        assert.strictEqual(err.message, 'Not connected');
+        assert.strictEqual(err.code, 'ERR_CLIENT_NOT_CONNECTED');
+        return true;
+      }
+    );
+  });
+
+  await test('guardClient intercepts listPrompts() on a closed client and rejects with Not connected', async () => {
+    const guard = new ClientSessionGuard();
+    const rawClient: any = {
+      transport: undefined,
+      listPrompts: async () => ({ prompts: [] }),
+      close: async () => {}
+    };
+
+    const client = guard.guardClient(rawClient);
+    guard.markClosed();
+
+    await assert.rejects(
+      async () => await client.listPrompts(),
+      (err: any) => {
+        assert.ok(err instanceof ClientSessionError);
+        assert.strictEqual(err.message, 'Not connected');
+        return true;
+      }
+    );
+  });
+
+  await test('guardClient intercepts listResources() and listResourceTemplates() on closed client', async () => {
+    const guard = new ClientSessionGuard();
+    const rawClient: any = {
+      transport: undefined,
+      listResources: async () => ({ resources: [] }),
+      listResourceTemplates: async () => ({ resourceTemplates: [] }),
+      close: async () => {}
+    };
+
+    const client = guard.guardClient(rawClient);
+    guard.markClosed();
+
+    await assert.rejects(async () => await client.listResources(), /Not connected/);
+    await assert.rejects(async () => await client.listResourceTemplates(), /Not connected/);
+  });
+
+  await test('guardClient allows listTools() to resolve empty array when connected but server lacks capability', async () => {
+    const guard = new ClientSessionGuard();
+    const rawClient: any = {
+      transport: { mock: 'transport' },
+      _serverCapabilities: {}, // Connected, but no tools key
+      listTools: async () => {
+        return { tools: [{ name: 'should_not_reach_here' }] };
+      }
+    };
+
+    const client = guard.guardClient(rawClient);
+    guard.markConnected();
+
+    const res = await client.listTools();
+    assert.deepStrictEqual(res, { tools: [] });
+  });
+
+  await test('guardClient allows listTools() to resolve tools when server has capability and is connected', async () => {
+    const guard = new ClientSessionGuard();
+    const rawClient: any = {
+      transport: { mock: 'transport' },
+      _serverCapabilities: { tools: {} },
+      listTools: async () => {
+        return { tools: [{ name: 'calculate_checksum', inputSchema: {} }] };
+      }
+    };
+
+    const client = guard.guardClient(rawClient);
+    guard.markConnected();
+
+    const res = await client.listTools();
+    assert.strictEqual(res.tools.length, 1);
+    assert.strictEqual((res.tools[0] as any).name, 'calculate_checksum');
+  });
+
+  await test('guardClient callTool() and ping() reject with Not connected when disconnected', async () => {
+    const guard = new ClientSessionGuard();
+    const rawClient: any = {
+      transport: undefined,
+      callTool: async () => ({ content: [] }),
+      ping: async () => ({})
+    };
+
+    const client = guard.guardClient(rawClient);
+
+    await assert.rejects(async () => await client.callTool({ name: 'test' }), /Not connected/);
+    await assert.rejects(async () => await client.ping(), /Not connected/);
+  });
+
+  await test('guardClient with autoReconnect=true triggers reconnectHandler on listTools() when disconnected', async () => {
+    let reconnected = false;
+    const rawClient: any = {
+      transport: undefined,
+      _serverCapabilities: { tools: {} },
+      listTools: async () => ({ tools: [{ name: 'recovered_tool' }] })
+    };
+
+    const guard = new ClientSessionGuard({
+      autoReconnect: true,
+      reconnectHandler: async () => {
+        reconnected = true;
+        rawClient.transport = { mock: 'recovered_transport' };
+        guard.markConnected();
+      }
+    });
+
+    const client = guard.guardClient(rawClient);
+    const res = await client.listTools();
+
+    assert.strictEqual(reconnected, true);
+    assert.strictEqual(res.tools.length, 1);
+    assert.strictEqual((res.tools[0] as any).name, 'recovered_tool');
+  });
+
+  await test('wrapClientWithSessionGuard exposes working wrapper helper', async () => {
+    const rawClient: any = {
+      transport: undefined,
+      listTools: async () => ({ tools: [] }),
+      close: async () => {}
+    };
+
+    const bundle = wrapClientWithSessionGuard(rawClient);
+    assert.ok(bundle.client);
+    assert.ok(bundle.guard instanceof ClientSessionGuard);
+    assert.strictEqual(bundle.guard.getState(), 'DISCONNECTED');
   });
 
   // Summary
