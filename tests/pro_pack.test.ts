@@ -101,6 +101,12 @@ import {
   hasActiveSubscriptionFilters,
   createGuardedSubscriptionRouter
 } from '../pro_pack/subscription_router_guard.ts';
+import {
+  normalizeHttpRequestBody,
+  formatJsonRpcParseError,
+  handleNormalizedFetch,
+  createMcpHonoNormalizerMiddleware
+} from '../pro_pack/http_transport_normalizer.ts';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -2637,6 +2643,132 @@ async function runProPackTestSuite() {
     const router = createGuardedSubscriptionRouter({ maxSubscriptions: 25 });
     assert.ok(router instanceof SubscriptionRouterGuard);
     assert.strictEqual(router.getMaxSubscriptions(), 25);
+  });
+
+  console.log('\n[Module: HTTP Transport & Body Parsing Normalizer]');
+
+  await test('normalizeHttpRequestBody skips parsing for GET requests even with application/json header (resolves #3201)', async () => {
+    const res = await normalizeHttpRequestBody('GET', 'application/json', () => '');
+    assert.strictEqual(res.skipParsing, true);
+    assert.strictEqual(res.isEmpty, true);
+    assert.strictEqual(res.error, undefined);
+  });
+
+  await test('normalizeHttpRequestBody skips parsing for HEAD requests with application/json header', async () => {
+    const res = await normalizeHttpRequestBody('HEAD', 'application/json', () => '');
+    assert.strictEqual(res.skipParsing, true);
+    assert.strictEqual(res.isEmpty, true);
+    assert.strictEqual(res.error, undefined);
+  });
+
+  await test('normalizeHttpRequestBody skips parsing for non-JSON content-type', async () => {
+    const res = await normalizeHttpRequestBody('POST', 'text/plain', () => 'hello');
+    assert.strictEqual(res.skipParsing, true);
+    assert.strictEqual(res.error, undefined);
+  });
+
+  await test('normalizeHttpRequestBody handles bodyless DELETE requests with application/json without throwing SyntaxError', async () => {
+    // StreamableHTTPClientTransport copies Content-Type: application/json onto DELETE terminateSession()
+    const res = await normalizeHttpRequestBody('DELETE', 'application/json', () => '');
+    assert.strictEqual(res.skipParsing, false);
+    assert.strictEqual(res.isEmpty, true);
+    assert.strictEqual(res.parsedBody, undefined);
+    assert.strictEqual(res.error, undefined);
+  });
+
+  await test('normalizeHttpRequestBody handles empty POST with application/json and leaves parsedBody undefined', async () => {
+    const res = await normalizeHttpRequestBody('POST', 'application/json', () => '   ');
+    assert.strictEqual(res.skipParsing, false);
+    assert.strictEqual(res.isEmpty, true);
+    assert.strictEqual(res.parsedBody, undefined);
+    assert.strictEqual(res.error, undefined);
+  });
+
+  await test('normalizeHttpRequestBody parses valid JSON body on POST request', async () => {
+    const payload = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
+    const res = await normalizeHttpRequestBody('POST', 'application/json', () => payload);
+
+    assert.strictEqual(res.skipParsing, false);
+    assert.strictEqual(res.isEmpty, false);
+    assert.strictEqual(res.error, undefined);
+    assert.deepStrictEqual((res.parsedBody as any).method, 'tools/list');
+  });
+
+  await test('normalizeHttpRequestBody catches malformed JSON on POST and returns jsonRpcCode -32700 error', async () => {
+    const res = await normalizeHttpRequestBody('POST', 'application/json', () => '{ broken_json');
+
+    assert.strictEqual(res.skipParsing, false);
+    assert.ok(res.error);
+    assert.strictEqual(res.error.statusCode, 400);
+    assert.strictEqual(res.error.jsonRpcCode, -32700);
+    assert.ok(res.error.message.includes('Parse error: Invalid JSON'));
+  });
+
+  await test('normalizeHttpRequestBody enforces maxBytes payload ceiling and returns 413 error', async () => {
+    const bigString = 'a'.repeat(200);
+    const res = await normalizeHttpRequestBody('POST', 'application/json', () => bigString, { maxBytes: 100 });
+
+    assert.ok(res.error);
+    assert.strictEqual(res.error.statusCode, 413);
+    assert.strictEqual(res.tooLarge, true);
+  });
+
+  await test('formatJsonRpcParseError emits valid JSON-RPC 2.0 error structure', () => {
+    const err = formatJsonRpcParseError('Invalid syntax');
+    assert.strictEqual(err.jsonrpc, '2.0');
+    assert.strictEqual(err.id, null);
+    assert.strictEqual(err.error.code, -32700);
+    assert.strictEqual(err.error.message, 'Invalid syntax');
+  });
+
+  await test('handleNormalizedFetch passes GET with application/json to nextHandler with status 200', async () => {
+    const req = new Request('http://localhost:3000/sse', {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+    let nextCalled = false;
+    const res = await handleNormalizedFetch(req, async (_r, parsed) => {
+      nextCalled = true;
+      assert.strictEqual(parsed, undefined);
+      return new Response('SSE stream active', { status: 200 });
+    });
+
+    assert.strictEqual(nextCalled, true);
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(await res.text(), 'SSE stream active');
+  });
+
+  await test('handleNormalizedFetch returns 204 with CORS headers on OPTIONS preflight request', async () => {
+    const req = new Request('http://localhost:3000/mcp', { method: 'OPTIONS' });
+    const res = await handleNormalizedFetch(req, async () => new Response('not reached'));
+
+    assert.strictEqual(res.status, 204);
+    assert.ok(res.headers.get('access-control-allow-methods')?.includes('GET'));
+  });
+
+  await test('createMcpHonoNormalizerMiddleware populates c.set parsedBody and skips empty bodies without 400 error', async () => {
+    const middleware = createMcpHonoNormalizerMiddleware();
+
+    const contextMap = new Map<string, any>();
+    const mockContext = {
+      req: {
+        method: 'GET',
+        header: (name: string) => (name.toLowerCase() === 'content-type' ? 'application/json' : undefined),
+        text: async () => ''
+      },
+      set: (key: string, val: any) => contextMap.set(key, val),
+      text: (msg: string, code: number) => ({ body: msg, status: code })
+    };
+
+    let nextExecuted = false;
+    await middleware(mockContext, async () => {
+      nextExecuted = true;
+    });
+
+    assert.strictEqual(nextExecuted, true);
+    assert.strictEqual(contextMap.get('parsedBody'), undefined);
+    assert.strictEqual(contextMap.get('isBodyEmpty'), true);
   });
 
   // Summary
