@@ -95,6 +95,12 @@ import {
   ClientSessionError,
   wrapClientWithSessionGuard
 } from '../pro_pack/client_session_guard.ts';
+import {
+  SubscriptionRouterGuard,
+  computeHonoredSubset,
+  hasActiveSubscriptionFilters,
+  createGuardedSubscriptionRouter
+} from '../pro_pack/subscription_router_guard.ts';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -2453,6 +2459,184 @@ async function runProPackTestSuite() {
     assert.ok(bundle.client);
     assert.ok(bundle.guard instanceof ClientSessionGuard);
     assert.strictEqual(bundle.guard.getState(), 'DISCONNECTED');
+  });
+
+  console.log('\n[Module: Resilient Subscription Router & Capacity Guard]');
+
+  await test('computeHonoredSubset intersects requested notifications with server capabilities', () => {
+    const requested = {
+      toolsListChanged: true,
+      promptsListChanged: true,
+      resourcesListChanged: true
+    };
+    const capabilities = {
+      tools: {},
+      resources: { listChanged: true }
+      // prompts omitted
+    };
+
+    const honored = computeHonoredSubset(requested, capabilities);
+    assert.strictEqual(honored.toolsListChanged, true);
+    assert.strictEqual(honored.resourcesListChanged, true);
+    assert.strictEqual(honored.promptsListChanged, undefined);
+  });
+
+  await test('computeHonoredSubset returns empty object when requested capability is not advertised', () => {
+    const requested = { promptsListChanged: true };
+    const capabilities = { tools: {} };
+
+    const honored = computeHonoredSubset(requested, capabilities);
+    assert.deepStrictEqual(honored, {});
+  });
+
+  await test('hasActiveSubscriptionFilters correctly identifies non-empty filters', () => {
+    assert.strictEqual(hasActiveSubscriptionFilters({}), false);
+    assert.strictEqual(hasActiveSubscriptionFilters({ toolsListChanged: true }), true);
+    assert.strictEqual(hasActiveSubscriptionFilters({ promptsListChanged: true }), true);
+    assert.strictEqual(hasActiveSubscriptionFilters({ resourcesListChanged: true }), true);
+    assert.strictEqual(hasActiveSubscriptionFilters({ resourceUpdated: ['file:///test.txt'] }), true);
+    assert.strictEqual(hasActiveSubscriptionFilters({ resourceUpdated: [] }), false);
+  });
+
+  await test('SubscriptionRouterGuard immediately completes with complete result when honoredSubset is empty (resolves #3199)', () => {
+    const guard = new SubscriptionRouterGuard({
+      capabilities: { tools: {} },
+      serverInfo: { name: 'test-server', version: '1.0.0' }
+    });
+
+    const sentMessages: any[] = [];
+    const res = guard.handleListenRequest(
+      101,
+      { notifications: { promptsListChanged: true } },
+      (msg) => sentMessages.push(msg)
+    );
+
+    assert.strictEqual(res.status, 'graceful_complete');
+    assert.strictEqual(sentMessages.length, 2);
+
+    // 1st message: acknowledged with empty notifications
+    assert.strictEqual(sentMessages[0].method, 'notifications/subscriptions/acknowledged');
+    assert.deepStrictEqual(sentMessages[0].params.notifications, {});
+
+    // 2nd message: complete result with subscriptionId in _meta
+    assert.strictEqual(sentMessages[1].id, 101);
+    assert.strictEqual(sentMessages[1].result.resultType, 'complete');
+    assert.strictEqual(sentMessages[1].result._meta['io.modelcontextprotocol/subscriptionId'], 101);
+  });
+
+  await test('SubscriptionRouterGuard does NOT retain subscription in activeSubscriptions when honoredSubset is empty', () => {
+    const guard = new SubscriptionRouterGuard({ capabilities: { tools: {} } });
+
+    guard.handleListenRequest(102, { notifications: { promptsListChanged: true } }, () => {});
+
+    assert.strictEqual(guard.getActiveCount(), 0);
+    assert.strictEqual(guard.hasSubscription(102), false);
+  });
+
+  await test('Reproduction of #3199: Empty subscriptions do NOT count against maxSubscriptions limit', () => {
+    // Set maxSubscriptions to 1
+    const guard = new SubscriptionRouterGuard({
+      maxSubscriptions: 1,
+      capabilities: { tools: {} }
+    });
+
+    const sentMessages: any[] = [];
+
+    // 1st call: promptsListChanged (unadvertised, honored is {})
+    const r1 = guard.handleListenRequest(
+      1,
+      { notifications: { promptsListChanged: true } },
+      (msg) => sentMessages.push(msg)
+    );
+    assert.strictEqual(r1.status, 'graceful_complete');
+    assert.strictEqual(guard.getActiveCount(), 0);
+
+    // 2nd call: toolsListChanged (advertised, should SUCCEED and NOT be blocked by limit)
+    const r2 = guard.handleListenRequest(
+      2,
+      { notifications: { toolsListChanged: true } },
+      (msg) => sentMessages.push(msg)
+    );
+
+    // Resolves #3199: Must succeed, NOT fail with -32603 "Subscription limit reached"
+    assert.strictEqual(r2.status, 'subscribed');
+    assert.strictEqual(guard.getActiveCount(), 1);
+    assert.strictEqual(guard.hasSubscription(2), true);
+  });
+
+  await test('SubscriptionRouterGuard accepts valid subscription when server advertises capability', () => {
+    const guard = new SubscriptionRouterGuard({
+      capabilities: { tools: {} }
+    });
+
+    const sent: any[] = [];
+    const res = guard.handleListenRequest(103, { notifications: { toolsListChanged: true } }, (m) => sent.push(m));
+
+    assert.strictEqual(res.status, 'subscribed');
+    assert.strictEqual(sent.length, 1);
+    assert.strictEqual(sent[0].method, 'notifications/subscriptions/acknowledged');
+    assert.deepStrictEqual(sent[0].params.notifications, { toolsListChanged: true });
+    assert.strictEqual(guard.getActiveCount(), 1);
+  });
+
+  await test('SubscriptionRouterGuard enforces maxSubscriptions limit when valid subscriptions exceed capacity (-32603)', () => {
+    const guard = new SubscriptionRouterGuard({
+      maxSubscriptions: 1,
+      capabilities: { tools: {} }
+    });
+
+    const sent: any[] = [];
+    guard.handleListenRequest(1, { notifications: { toolsListChanged: true } }, (m) => sent.push(m));
+    assert.strictEqual(guard.getActiveCount(), 1);
+
+    const r2 = guard.handleListenRequest(2, { notifications: { toolsListChanged: true } }, (m) => sent.push(m));
+    assert.strictEqual(r2.status, 'rejected');
+    assert.strictEqual(sent[1].error.code, -32603);
+    assert.ok(sent[1].error.message.includes('Subscription limit reached'));
+  });
+
+  await test('SubscriptionRouterGuard releases slot immediately on handleCancel', () => {
+    const guard = new SubscriptionRouterGuard({ capabilities: { tools: {} } });
+
+    guard.handleListenRequest(50, { notifications: { toolsListChanged: true } }, () => {});
+    assert.strictEqual(guard.getActiveCount(), 1);
+
+    const cancelled = guard.handleCancel(50);
+    assert.strictEqual(cancelled, true);
+    assert.strictEqual(guard.getActiveCount(), 0);
+  });
+
+  await test('SubscriptionRouterGuard dispatchNotification sends event only to matching subscriptions', () => {
+    const guard = new SubscriptionRouterGuard({
+      capabilities: { tools: {}, prompts: {} }
+    });
+
+    guard.handleListenRequest(10, { notifications: { toolsListChanged: true } }, () => {});
+    guard.handleListenRequest(20, { notifications: { promptsListChanged: true } }, () => {});
+
+    const sent: any[] = [];
+    const count = guard.dispatchNotification('toolsListChanged', { eventData: 'sample' }, (m) => sent.push(m));
+
+    assert.strictEqual(count, 1);
+    assert.strictEqual(sent.length, 1);
+    assert.strictEqual(sent[0].method, 'notifications/toolsListChanged');
+    assert.strictEqual(sent[0].params.subscriptionId, 10);
+  });
+
+  await test('SubscriptionRouterGuard clear() removes all subscriptions on transport teardown', () => {
+    const guard = new SubscriptionRouterGuard({ capabilities: { tools: {} } });
+    guard.handleListenRequest(1, { notifications: { toolsListChanged: true } }, () => {});
+    guard.handleListenRequest(2, { notifications: { toolsListChanged: true } }, () => {});
+
+    assert.strictEqual(guard.getActiveCount(), 2);
+    guard.clear();
+    assert.strictEqual(guard.getActiveCount(), 0);
+  });
+
+  await test('createGuardedSubscriptionRouter helper factory initializes cleanly', () => {
+    const router = createGuardedSubscriptionRouter({ maxSubscriptions: 25 });
+    assert.ok(router instanceof SubscriptionRouterGuard);
+    assert.strictEqual(router.getMaxSubscriptions(), 25);
   });
 
   // Summary
