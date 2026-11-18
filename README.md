@@ -32,6 +32,7 @@
 | **SSE Reconnect & Teardown Guard** | - | **Immediate close on handshake failure, bounds retry backoff** |
 | **Stdio Lifecycle & Epoch Fence** | - | **Monotonic epoch fence, eliminates Connection closed races & reaps orphans** |
 | **Client Session Invariants** | - | **Fail-closed discovery on closed client, prevents hallucinated empty tools** |
+| **Subscription Router Guard** | - | **Zero-slot graceful completion for unadvertised filters, prevents DoS** |
 | **Commercial Distribution** | Free under MIT License | **Commercial License + Instant ZIP Download** |
 
 ---
@@ -139,8 +140,9 @@ docker run -p 3000:3000 -e TRANSPORT=sse mcp-production-kit
 
 ## Commercial Pro Pack ($19 One-Time)
 
-For production cloud deployments, multi-agent frameworks, and enterprise teams, the **Pro Pack** provides drop-in, battle-tested extensions with 189 dedicated automated unit tests (203 total across the project):
+For production cloud deployments, multi-agent frameworks, and enterprise teams, the **Pro Pack** provides drop-in, battle-tested extensions with 201 dedicated automated unit tests (215 total across the project):
 
+* **Resilient Subscription Router & Capacity Guard:** Resolves subscription slot exhaustion and capacity Denial-of-Service (-32603) on stdio transports (typescript-sdk #3199). Immediately emits SubscriptionsListenResult (resultType: 'complete') for unadvertised filters in 0ms, releasing slots instantaneously and preventing client-side subscription.closed promise hangs.
 * **Client Session & Fail-Closed Capability Invariants:** Resolves the silent empty array resolution bug on closed clients (typescript-sdk #3195). Enforces strict fail-closed connection checks before evaluating capabilities or response caches, preventing AI agents from hallucinating tool absence when servers disconnect, and provides auto-reconnection recovery sentinels.
 * **Stdio Lifecycle & Monotonic Epoch Fence:** Resolves transport collision race conditions and "Connection closed" errors during handshake retries (typescript-sdk #3194). Enforces monotonic connection epochs, intercepts and suppresses delayed onclose/onerror events from previous child processes before they can corrupt active client state, guarantees transport.close() is awaited before rethrow, and cross-platform process tree reaping via taskkill (Windows) and process-group SIGKILL (POSIX).
 * **Resilient SSE Reconnect & Handshake Teardown Guard:** Prevents client-side zombie connection leaks and background reconnect storms when connecting to MCP servers over SSE (typescript-sdk #3193). Guarantees immediate .close() execution on handshake rejection, bounds reconnection attempts with jittered exponential backoff, halts retries on terminal HTTP errors (401, 403, 404), and unrefs internal timers to guarantee clean process exit.
@@ -161,7 +163,7 @@ For production cloud deployments, multi-agent frameworks, and enterprise teams, 
 * **Cloudflare Workers & Docker Compose:** Serverless edge hosting with streaming SSE, plus unprivileged non-root container deployment.
 
 **[Get Pro Pack ($19.00 USD) — Instant Checkout on Whop](https://whop.com/checkout/plan_eiKHeRpooY3yc)**  
-*(Delivery: Instant download of `mcp-pro-pack-v2.6.0.zip` via Whop Files and customer billing portal upon completion).*
+*(Delivery: Instant download of `mcp-pro-pack-v2.7.0.zip` via Whop Files and customer billing portal upon completion).*
 
 ---
 
