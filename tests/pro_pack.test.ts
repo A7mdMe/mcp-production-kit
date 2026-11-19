@@ -122,6 +122,14 @@ import {
   MCP_ERROR_UNSUPPORTED_PROTOCOL,
   MCP_ERROR_CONNECTION_CLOSED
 } from '../pro_pack/stream_resumption_guard.ts';
+import {
+  getLockPaths,
+  isProcessAlive,
+  createLiveGuard,
+  removeLiveGuard,
+  clearStaleGuardSafely,
+  ResilientFileLock
+} from '../pro_pack/file_lock_guard.ts';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -3082,6 +3090,166 @@ async function runProPackTestSuite() {
     assert.strictEqual(parsed.id, 'msg-abc');
     assert.strictEqual(parsed.error.code, -32603);
     assert.strictEqual(parsed.error.message, 'Internal server stream termination');
+  });
+
+  // ==========================================
+  // Module 24: Cross-Process Resilient File & Memory Lock Guard
+  // ==========================================
+  console.log('\n[Module: Cross-Process Resilient File & Memory Lock Guard]');
+
+  const tmpTestDir = path.join(os.tmpdir(), `mcp-lock-test-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`);
+  fs.mkdirSync(tmpTestDir, { recursive: true });
+
+  await test('getLockPaths generates standard .lock and .lock.break paths', () => {
+    const paths = getLockPaths('/path/to/memory.json');
+    assert.strictEqual(paths.lockPath, '/path/to/memory.json.lock');
+    assert.strictEqual(paths.guardPath, '/path/to/memory.json.lock.break');
+  });
+
+  await test('isProcessAlive accurately identifies process liveness', () => {
+    assert.strictEqual(isProcessAlive(process.pid), true);
+    assert.strictEqual(isProcessAlive(-1), false);
+    assert.strictEqual(isProcessAlive(99999999), false);
+  });
+
+  await test('createLiveGuard creates guard with exclusive flag and token', () => {
+    const guardPath = path.join(tmpTestDir, 'test1.lock.break');
+    const { token, created } = createLiveGuard(guardPath, 12345);
+    assert.strictEqual(created, true);
+    assert.ok(token.startsWith('guard-12345-'));
+    assert.strictEqual(fs.existsSync(guardPath), true);
+
+    // Second exclusive create must fail
+    const second = createLiveGuard(guardPath, 54321);
+    assert.strictEqual(second.created, false);
+    assert.strictEqual(second.token, '');
+
+    // Cleanup
+    fs.unlinkSync(guardPath);
+  });
+
+  await test('removeLiveGuard only deletes file when token matches holder', () => {
+    const guardPath = path.join(tmpTestDir, 'test2.lock.break');
+    const { token } = createLiveGuard(guardPath, 111);
+
+    // Mismatched token must fail to remove
+    const removedWrong = removeLiveGuard(guardPath, 'wrong-token');
+    assert.strictEqual(removedWrong, false);
+    assert.strictEqual(fs.existsSync(guardPath), true);
+
+    // Matching token removes cleanly
+    const removedRight = removeLiveGuard(guardPath, token);
+    assert.strictEqual(removedRight, true);
+    assert.strictEqual(fs.existsSync(guardPath), false);
+  });
+
+  await test('clearStaleGuardSafely rejects clearing non-stale guard', () => {
+    const guardPath = path.join(tmpTestDir, 'test3.lock.break');
+    createLiveGuard(guardPath, 222);
+
+    const result = clearStaleGuardSafely(guardPath, 60000); // 60s timeout, guard was just created
+    assert.strictEqual(result.cleared, false);
+    assert.strictEqual(result.reason, 'NOT_STALE');
+    assert.strictEqual(fs.existsSync(guardPath), true);
+
+    fs.unlinkSync(guardPath);
+  });
+
+  await test('clearStaleGuardSafely clears stale guard via atomic rename staging', () => {
+    const guardPath = path.join(tmpTestDir, 'test4.lock.break');
+    createLiveGuard(guardPath, 333);
+
+    // Simulate age by back-dating stat mtime
+    const oldTime = (Date.now() - 40000) / 1000;
+    fs.utimesSync(guardPath, oldTime, oldTime);
+
+    const result = clearStaleGuardSafely(guardPath, 30000);
+    assert.strictEqual(result.cleared, true);
+    assert.strictEqual(result.reason, 'CLEARED');
+    assert.strictEqual(fs.existsSync(guardPath), false);
+  });
+
+  await test('Deterministic ABA Concurrency Test: fresh guard survives concurrent stale clearers (resolves #5624)', () => {
+    const guardPath = path.join(tmpTestDir, 'shared-memory.json.lock.break');
+
+    // 1. Initial crash-left stale guard
+    const staleGuard = createLiveGuard(guardPath, 9999);
+    const oldTime = (Date.now() - 50000) / 1000;
+    fs.utimesSync(guardPath, oldTime, oldTime);
+
+    // 2. Clearer A acts and clears stale guard
+    const clearerA = clearStaleGuardSafely(guardPath, 30000);
+    assert.strictEqual(clearerA.cleared, true);
+    assert.strictEqual(clearerA.reason, 'CLEARED');
+    assert.strictEqual(fs.existsSync(guardPath), false);
+
+    // 3. Process C (a live releasing holder or new acquirer) creates a FRESH live guard at the exact same path
+    const liveGuardC = createLiveGuard(guardPath, process.pid);
+    assert.strictEqual(liveGuardC.created, true);
+    assert.ok(liveGuardC.token.length > 0);
+
+    // 4. Delayed Clearer B (who had judged the stale guard before C created it) attempts to clear guardPath
+    // Because Clearer B's atomic rename checks age or encounters fresh guard, live guard MUST NOT BE DELETED!
+    const clearerB = clearStaleGuardSafely(guardPath, 30000);
+    assert.strictEqual(clearerB.cleared, false);
+    assert.strictEqual(clearerB.reason, 'NOT_STALE');
+
+    // 5. Verify Process C's live guard SURVIVED completely intact!
+    assert.strictEqual(fs.existsSync(guardPath), true);
+    const liveContent = JSON.parse(fs.readFileSync(guardPath, 'utf8'));
+    assert.strictEqual(liveContent.token, liveGuardC.token);
+    assert.strictEqual(liveContent.ownerPid, process.pid);
+
+    // Clean up
+    fs.unlinkSync(guardPath);
+  });
+
+  await test('ResilientFileLock acquires and releases exclusive lock file', () => {
+    const targetFile = path.join(tmpTestDir, 'agent-state.json');
+    const lock = new ResilientFileLock(targetFile, { staleTimeoutMs: 10000 });
+
+    const handle = lock.acquire();
+    assert.strictEqual(fs.existsSync(handle.lockPath), true);
+
+    const released = handle.release();
+    assert.strictEqual(released, true);
+    assert.strictEqual(fs.existsSync(handle.lockPath), false);
+  });
+
+  await test('ResilientFileLock release rejects if lock token was stolen', () => {
+    const targetFile = path.join(tmpTestDir, 'agent-state-2.json');
+    const lock = new ResilientFileLock(targetFile);
+
+    const handle = lock.acquire();
+    // Simulate someone overwriting the lock with a different token
+    fs.writeFileSync(handle.lockPath, JSON.stringify({ token: 'stolen-token', ownerPid: 888 }));
+
+    const released = handle.release();
+    assert.strictEqual(released, false);
+    assert.strictEqual(fs.existsSync(handle.lockPath), true);
+
+    fs.unlinkSync(handle.lockPath);
+  });
+
+  await test('ResilientFileLock detects and breaks stale lock held by dead PID', () => {
+    const targetFile = path.join(tmpTestDir, 'agent-state-3.json');
+    const { lockPath } = getLockPaths(targetFile);
+
+    // Stale lock belonging to non-existent PID
+    fs.writeFileSync(lockPath, JSON.stringify({
+      token: 'dead-pid-token',
+      ownerPid: 99999998,
+      acquiredAt: Date.now() - 40000,
+      staleTimeoutMs: 10000
+    }));
+
+    const lock = new ResilientFileLock(targetFile, { staleTimeoutMs: 10000 });
+    const handle = lock.acquire();
+    assert.strictEqual(fs.existsSync(handle.lockPath), true);
+    assert.notStrictEqual(handle.token, 'dead-pid-token');
+
+    handle.release();
+    assert.strictEqual(fs.existsSync(handle.lockPath), false);
   });
 
   // Summary
