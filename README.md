@@ -33,6 +33,7 @@
 | **Stdio Lifecycle & Epoch Fence** | - | **Monotonic epoch fence, eliminates Connection closed races & reaps orphans** |
 | **Client Session Invariants** | - | **Fail-closed discovery on closed client, prevents hallucinated empty tools** |
 | **Subscription Router Guard** | - | **Zero-slot graceful completion for unadvertised filters, prevents DoS** |
+| **Stream Resumption Guard** | - | **Fail-fast on premature close (#3210); -32022/-32021 checks (#3179, #3202)** |
 | **OAuth Issuer Guard** | - | **Template-aware Entra ID matching, WHATWG percent-decoding & IdP security** |
 | **HTTP Body Normalizer** | - | **Bypasses JSON parsing on bodyless requests, fixes 400 Invalid JSON** |
 | **Commercial Distribution** | Free under MIT License | **Commercial License + Instant ZIP Download** |
@@ -142,8 +143,9 @@ docker run -p 3000:3000 -e TRANSPORT=sse mcp-production-kit
 
 ## Commercial Pro Pack ($19 One-Time)
 
-For production cloud deployments, multi-agent frameworks, and enterprise teams, the **Pro Pack** provides drop-in, battle-tested extensions with 225 dedicated automated unit tests (239 total across the project):
+For production cloud deployments, multi-agent frameworks, and enterprise teams, the **Pro Pack** provides drop-in, battle-tested extensions with 238 dedicated automated unit tests (252 total across the project):
 
+* **Stream Resumption, Truncation & Protocol Negotiation Guard:** Eliminates 30s-60s agent hangs by instantly aborting pending requests with `ConnectionClosed` when Streamable HTTP per-request SSE streams close prematurely (typescript-sdk #3210). Validates resumption token endpoints against terminal HTTP 405/404/410/403 rejections, intercepts unsupported protocol versions on pinned stdio connections with standard JSON-RPC -32022 errors (#3179, #3206), and enforces client capability preconditions with JSON-RPC -32021 errors (#3202).
 * **Enterprise OAuth Issuer & Multi-Tenant Authority Guard:** Resolves Microsoft Entra ID `{tenantid}` template mismatch rejections on `/organizations/v2.0` and `/common/v2.0` endpoints without compromising security (typescript-sdk #3207). Features WHATWG URL percent-decoding normalization (`%7Btenantid%7D`), strict protocol/host/port pinning confined to approved authority domains, token issuer claim verification, and pluggable discovery hooks without disabling RFC 9207 mix-up attack protections.
 * **HTTP Transport & Body Parsing Normalizer:** Resolves plain-text 400 Invalid JSON crashes on bodyless GET, DELETE, HEAD, and OPTIONS requests carrying default Content-Type headers (typescript-sdk #3201). Leaves empty bodies unparsed so downstream SSE streams, session terminators, and CORS preflights execute cleanly, and emits structured JSON-RPC -32700 Parse Error envelopes on malformed POST payloads.
 * **Resilient Subscription Router & Capacity Guard:** Resolves subscription slot exhaustion and capacity Denial-of-Service (-32603) on stdio transports (typescript-sdk #3199). Immediately emits SubscriptionsListenResult (resultType: 'complete') for unadvertised filters in 0ms, releasing slots instantaneously and preventing client-side subscription.closed promise hangs.
@@ -167,7 +169,7 @@ For production cloud deployments, multi-agent frameworks, and enterprise teams, 
 * **Cloudflare Workers & Docker Compose:** Serverless edge hosting with streaming SSE, plus unprivileged non-root container deployment.
 
 **[Get Pro Pack ($19.00 USD) — Instant Checkout on Whop](https://whop.com/checkout/plan_eiKHeRpooY3yc)**  
-*(Delivery: Instant download of `mcp-pro-pack-v2.9.0.zip` via Whop Files and customer billing portal upon completion).*
+*(Delivery: Instant download of `mcp-pro-pack-v3.0.0.zip` via Whop Files and customer billing portal upon completion).*
 
 ---
 
