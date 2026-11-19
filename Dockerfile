@@ -13,6 +13,9 @@ FROM node:24-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 
+# Install tini to handle PID 1 signal forwarding & zombie reaping (resolves servers #5611)
+RUN apk add --no-cache tini
+
 COPY package*.json ./
 RUN npm ci --only=production
 COPY --from=builder /app/dist ./dist
@@ -21,5 +24,5 @@ COPY --from=builder /app/dist ./dist
 USER node
 
 # Default to stdio transport for local agents & Glama introspection
-ENTRYPOINT ["node", "dist/index.js"]
+ENTRYPOINT ["/sbin/tini", "--", "node", "dist/index.js"]
 CMD ["--transport=stdio"]
