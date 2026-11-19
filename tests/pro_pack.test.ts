@@ -130,6 +130,9 @@ import {
   clearStaleGuardSafely,
   ResilientFileLock
 } from '../pro_pack/file_lock_guard.ts';
+import {
+  ContainerLifecycleManager
+} from '../pro_pack/container_lifecycle_guard.ts';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -3250,6 +3253,111 @@ async function runProPackTestSuite() {
 
     handle.release();
     assert.strictEqual(fs.existsSync(handle.lockPath), false);
+  });
+
+  // ==========================================
+  // Module 25: Container & Process Lifecycle Guard
+  // ==========================================
+  console.log('\n[Module: Container & Process Lifecycle Guard]');
+
+  await test('ContainerLifecycleManager registers and unregisters drain hooks', () => {
+    const manager = new ContainerLifecycleManager({ autoExit: false });
+    let executed = false;
+    manager.registerDrainHook('test-hook', () => { executed = true; });
+    assert.strictEqual(manager.isDraining, false);
+    assert.strictEqual(manager.isTerminated, false);
+
+    const unregistered = manager.unregisterDrainHook('test-hook');
+    assert.strictEqual(unregistered, true);
+    assert.strictEqual(executed, false);
+  });
+
+  await test('triggerShutdown executes all asynchronous drain hooks', async () => {
+    let hook1Done = false;
+    let hook2Done = false;
+    let exitCodeCalled = -1;
+
+    const manager = new ContainerLifecycleManager({
+      autoExit: true,
+      exitFn: (code) => { exitCodeCalled = code; },
+      logger: () => {}
+    });
+
+    manager.registerDrainHook('hook1', async () => {
+      await new Promise(r => setTimeout(r, 10));
+      hook1Done = true;
+    });
+
+    manager.registerDrainHook('hook2', () => {
+      hook2Done = true;
+    });
+
+    const code = await manager.triggerShutdown('SIGTERM');
+    assert.strictEqual(hook1Done, true);
+    assert.strictEqual(hook2Done, true);
+    assert.strictEqual(code, 0);
+    assert.strictEqual(exitCodeCalled, 0);
+    assert.strictEqual(manager.isTerminated, true);
+  });
+
+  await test('triggerShutdown respects drainTimeoutMs deadline on stalled hooks', async () => {
+    let exited = false;
+    const manager = new ContainerLifecycleManager({
+      drainTimeoutMs: 50,
+      autoExit: true,
+      exitFn: () => { exited = true; },
+      logger: () => {}
+    });
+
+    // Hook that hangs indefinitely
+    manager.registerDrainHook('stalled-hook', async () => {
+      await new Promise(r => setTimeout(r, 5000));
+    });
+
+    const start = Date.now();
+    await manager.triggerShutdown('SIGTERM');
+    const elapsed = Date.now() - start;
+
+    assert.ok(elapsed < 500, `Should not wait 5000ms; elapsed: ${elapsed}ms`);
+    assert.strictEqual(exited, true);
+    assert.strictEqual(manager.isTerminated, true);
+  });
+
+  await test('handleHealthProbe returns 200 when healthy and 503 on readiness when draining', async () => {
+    const manager = new ContainerLifecycleManager({
+      autoExit: false,
+      logger: () => {}
+    });
+
+    const liveBefore = manager.handleHealthProbe('liveness');
+    assert.strictEqual(liveBefore.status, 200);
+    assert.strictEqual(liveBefore.body.ready, true);
+
+    const readyBefore = manager.handleHealthProbe('readiness');
+    assert.strictEqual(readyBefore.status, 200);
+
+    // Trigger shutdown without awaiting to observe draining state
+    const shutdownPromise = manager.triggerShutdown('SIGTERM');
+    assert.strictEqual(manager.isDraining, true);
+
+    const readyDuring = manager.handleHealthProbe('readiness');
+    assert.strictEqual(readyDuring.status, 503);
+    assert.strictEqual(readyDuring.body.ready, false);
+
+    await shutdownPromise;
+  });
+
+  await test('installSignalHandlers binds and unbinds listeners cleanly', () => {
+    const fakeProcess = new EventEmitter() as any;
+    const manager = new ContainerLifecycleManager({ autoExit: false, logger: () => {} });
+
+    const uninstall = manager.installSignalHandlers(fakeProcess);
+    assert.strictEqual(fakeProcess.listenerCount('SIGTERM'), 1);
+    assert.strictEqual(fakeProcess.listenerCount('SIGINT'), 1);
+
+    uninstall();
+    assert.strictEqual(fakeProcess.listenerCount('SIGTERM'), 0);
+    assert.strictEqual(fakeProcess.listenerCount('SIGINT'), 0);
   });
 
   // Summary
