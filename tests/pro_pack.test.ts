@@ -107,6 +107,11 @@ import {
   handleNormalizedFetch,
   createMcpHonoNormalizerMiddleware
 } from '../pro_pack/http_transport_normalizer.ts';
+import {
+  validateAuthorizationIssuer,
+  validateTokenIssuerClaim,
+  createTenantAwareIssuerValidator
+} from '../pro_pack/oauth_issuer_guard.ts';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -2769,6 +2774,129 @@ async function runProPackTestSuite() {
     assert.strictEqual(nextExecuted, true);
     assert.strictEqual(contextMap.get('parsedBody'), undefined);
     assert.strictEqual(contextMap.get('isBodyEmpty'), true);
+  });
+
+  console.log('\n[Module: Enterprise OAuth Issuer & Multi-Tenant Authority Guard]');
+
+  await test('validateAuthorizationIssuer returns valid=true on exact matching URLs (RFC 8414 §3.3 standard case)', () => {
+    const res = validateAuthorizationIssuer(
+      'https://auth.enterprise.com/oauth/v2',
+      'https://auth.enterprise.com/oauth/v2'
+    );
+    assert.strictEqual(res.valid, true);
+    assert.strictEqual(res.isTemplateMatch, false);
+    assert.strictEqual(res.error, undefined);
+  });
+
+  await test('validateAuthorizationIssuer matches Microsoft Entra ID /organizations/v2.0 against /{tenantid}/v2.0 template (resolves #3207)', () => {
+    const res = validateAuthorizationIssuer(
+      'https://login.microsoftonline.com/organizations/v2.0',
+      'https://login.microsoftonline.com/{tenantid}/v2.0'
+    );
+    assert.strictEqual(res.valid, true);
+    assert.strictEqual(res.isTemplateMatch, true);
+    assert.strictEqual(res.resolvedTenantId, 'organizations');
+    assert.strictEqual(res.error, undefined);
+  });
+
+  await test('validateAuthorizationIssuer matches Microsoft Entra ID /common/v2.0 against /{tenantid}/v2.0 template', () => {
+    const res = validateAuthorizationIssuer(
+      'https://login.microsoftonline.com/common/v2.0',
+      'https://login.microsoftonline.com/{tenantid}/v2.0'
+    );
+    assert.strictEqual(res.valid, true);
+    assert.strictEqual(res.isTemplateMatch, true);
+    assert.strictEqual(res.resolvedTenantId, 'common');
+  });
+
+  await test('validateAuthorizationIssuer matches template when received is a real tenant UUID', () => {
+    const tenantUuid = 'a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d';
+    const res = validateAuthorizationIssuer(
+      'https://login.microsoftonline.com/{tenantid}/v2.0',
+      `https://login.microsoftonline.com/${tenantUuid}/v2.0`
+    );
+    assert.strictEqual(res.valid, true);
+    assert.strictEqual(res.isTemplateMatch, true);
+    assert.strictEqual(res.resolvedTenantId, tenantUuid);
+  });
+
+  await test('validateAuthorizationIssuer rejects origin mismatch (prevents IdP mix-up attacks)', () => {
+    const res = validateAuthorizationIssuer(
+      'https://login.microsoftonline.com/organizations/v2.0',
+      'https://evil-attacker.com/{tenantid}/v2.0'
+    );
+    assert.strictEqual(res.valid, false);
+    assert.strictEqual(res.isTemplateMatch, false);
+    assert.ok(res.error?.includes('Origin mismatch'));
+  });
+
+  await test('validateAuthorizationIssuer rejects protocol downgrade attempts', () => {
+    const res = validateAuthorizationIssuer(
+      'https://login.microsoftonline.com/organizations/v2.0',
+      'http://login.microsoftonline.com/{tenantid}/v2.0'
+    );
+    assert.strictEqual(res.valid, false);
+    assert.ok(res.error?.includes('Origin mismatch'));
+  });
+
+  await test('validateAuthorizationIssuer rejects path segment length mismatch', () => {
+    const res = validateAuthorizationIssuer(
+      'https://login.microsoftonline.com/organizations/v2.0',
+      'https://login.microsoftonline.com/{tenantid}/v2.0/extra'
+    );
+    assert.strictEqual(res.valid, false);
+    assert.ok(res.error?.includes('Path segment length mismatch'));
+  });
+
+  await test('validateAuthorizationIssuer rejects template substitution on unapproved authority hosts', () => {
+    const res = validateAuthorizationIssuer(
+      'https://unapproved-idp.com/organizations/v2.0',
+      'https://unapproved-idp.com/{tenantid}/v2.0'
+    );
+    assert.strictEqual(res.valid, false);
+    assert.ok(res.error?.includes('rejected on unapproved authority host'));
+  });
+
+  await test('validateAuthorizationIssuer handles trailing slashes consistently', () => {
+    const res = validateAuthorizationIssuer(
+      'https://auth.company.com/v1/',
+      'https://auth.company.com/v1'
+    );
+    assert.strictEqual(res.valid, true);
+  });
+
+  await test('validateTokenIssuerClaim accepts valid Entra token issuer with matching tenant ID', () => {
+    const tenantId = '72f988bf-86f1-41af-91ab-2d7cd011db47';
+    const tokenIssuer = `https://login.microsoftonline.com/${tenantId}/v2.0`;
+
+    const isValid = validateTokenIssuerClaim(tokenIssuer, tenantId);
+    assert.strictEqual(isValid, true);
+  });
+
+  await test('validateTokenIssuerClaim rejects token issuer with mismatched tenant ID or non-https scheme', () => {
+    const tenantId = '72f988bf-86f1-41af-91ab-2d7cd011db47';
+    const wrongTenant = '11111111-2222-3333-4444-555555555555';
+
+    assert.strictEqual(validateTokenIssuerClaim(`https://login.microsoftonline.com/${wrongTenant}/v2.0`, tenantId), false);
+    assert.strictEqual(validateTokenIssuerClaim(`http://login.microsoftonline.com/${tenantId}/v2.0`, tenantId), false);
+    assert.strictEqual(validateTokenIssuerClaim('not-a-url', tenantId), false);
+  });
+
+  await test('createTenantAwareIssuerValidator pluggable predicate returns boolean compatible with discovery hooks', () => {
+    const validator = createTenantAwareIssuerValidator();
+    assert.strictEqual(typeof validator, 'function');
+
+    const pass = validator(
+      'https://login.microsoftonline.com/organizations/v2.0',
+      'https://login.microsoftonline.com/{tenantid}/v2.0'
+    );
+    assert.strictEqual(pass, true);
+
+    const fail = validator(
+      'https://login.microsoftonline.com/organizations/v2.0',
+      'https://attacker.com/organizations/v2.0'
+    );
+    assert.strictEqual(fail, false);
   });
 
   // Summary
