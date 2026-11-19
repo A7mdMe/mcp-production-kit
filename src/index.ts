@@ -31,6 +31,26 @@ async function main() {
 
   logger.info(`Initializing ${config.SERVER_NAME} v${config.SERVER_VERSION} (Mode: ${transportMode})`);
 
+  // Universal PID 1 Signal Handling for Docker & Process Orchestrators
+  let isShuttingDown = false;
+  const gracefulShutdown = (signal: string) => {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+    logger.info(`Received ${signal}, shutting down MCP server gracefully...`);
+
+    // Force exit after 3 seconds if transport drain takes too long
+    const forceExitTimer = setTimeout(() => {
+      logger.warn('Forcing server exit after shutdown timeout');
+      process.exit(0);
+    }, 3000);
+    if (typeof forceExitTimer.unref === 'function') forceExitTimer.unref();
+
+    process.exit(0);
+  };
+
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
   const server = createProductionServer(config, logger);
 
   if (transportMode === 'sse' || transportMode === 'http') {
