@@ -112,6 +112,16 @@ import {
   validateTokenIssuerClaim,
   createTenantAwareIssuerValidator
 } from '../pro_pack/oauth_issuer_guard.ts';
+import {
+  StreamTruncationGuard,
+  validateResumptionAttempt,
+  validateProtocolVersion,
+  validateClientCapabilities,
+  createTerminalStreamError,
+  MCP_ERROR_MISSING_CAPABILITY,
+  MCP_ERROR_UNSUPPORTED_PROTOCOL,
+  MCP_ERROR_CONNECTION_CLOSED
+} from '../pro_pack/stream_resumption_guard.ts';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -2897,6 +2907,181 @@ async function runProPackTestSuite() {
       'https://attacker.com/organizations/v2.0'
     );
     assert.strictEqual(fail, false);
+  });
+
+  // ==========================================
+  // Module 23: Stream Resumption, Truncation & Protocol Negotiation Guard
+  // ==========================================
+  console.log('\n[Module: Stream Resumption, Truncation & Protocol Negotiation Guard]');
+
+  await test('StreamTruncationGuard registers request and unregisters cleanly upon response', () => {
+    const guard = new StreamTruncationGuard();
+    let rejected = false;
+    const { markResponded } = guard.registerRequest(1, () => { rejected = true; }, 5000);
+    assert.strictEqual(guard.activeCount, 1);
+    markResponded();
+    assert.strictEqual(guard.activeCount, 0);
+    assert.strictEqual(rejected, false);
+  });
+
+  await test('StreamTruncationGuard handleStreamEnd immediately aborts with ConnectionClosed on unexpected stream close (resolves #3210)', () => {
+    const guard = new StreamTruncationGuard();
+    let caughtErr: any = null;
+    guard.registerRequest(42, (err) => { caughtErr = err; }, 5000);
+
+    const aborted = guard.handleStreamEnd(42, 'Per-request SSE stream closed before a JSON-RPC response was received');
+    assert.strictEqual(aborted, true);
+    assert.ok(caughtErr, 'Error should have been emitted');
+    assert.strictEqual(caughtErr.code, MCP_ERROR_CONNECTION_CLOSED);
+    assert.strictEqual(caughtErr.isConnectionClosed, true);
+    assert.strictEqual(guard.activeCount, 0);
+  });
+
+  await test('StreamTruncationGuard handleStreamEnd ignores already responded streams without error', () => {
+    const guard = new StreamTruncationGuard();
+    let caughtErr: any = null;
+    const { markResponded } = guard.registerRequest('req-99', (err) => { caughtErr = err; }, 5000);
+    markResponded();
+    const aborted = guard.handleStreamEnd('req-99');
+    assert.strictEqual(aborted, false);
+    assert.strictEqual(caughtErr, null);
+  });
+
+  await test('StreamTruncationGuard clear aborts all pending streams on transport disconnect', () => {
+    const guard = new StreamTruncationGuard();
+    const errors: any[] = [];
+    guard.registerRequest('a', (err) => errors.push(err));
+    guard.registerRequest('b', (err) => errors.push(err));
+    assert.strictEqual(guard.activeCount, 2);
+
+    guard.clear('Client transport disconnect');
+    assert.strictEqual(guard.activeCount, 0);
+    assert.strictEqual(errors.length, 2);
+    assert.strictEqual(errors[0].code, MCP_ERROR_CONNECTION_CLOSED);
+    assert.strictEqual(errors[1].code, MCP_ERROR_CONNECTION_CLOSED);
+  });
+
+  await test('validateResumptionAttempt identifies HTTP 405 Method Not Allowed as non-resumable terminal status (resolves #3210)', () => {
+    const res = validateResumptionAttempt({
+      resumptionToken: 'prev-event-token-123',
+      httpStatus: 405
+    });
+    assert.strictEqual(res.canResume, false);
+    assert.strictEqual(res.isTerminal, true);
+    assert.strictEqual(res.status, 405);
+    assert.ok(res.reason?.includes('HTTP 405 Method Not Allowed'));
+  });
+
+  await test('validateResumptionAttempt identifies HTTP 404, 410 and 403 as terminal errors', () => {
+    const res404 = validateResumptionAttempt({ httpStatus: 404 });
+    assert.strictEqual(res404.canResume, false);
+    assert.strictEqual(res404.isTerminal, true);
+
+    const res410 = validateResumptionAttempt({ httpStatus: 410 });
+    assert.strictEqual(res410.canResume, false);
+    assert.strictEqual(res410.isTerminal, true);
+
+    const res403 = validateResumptionAttempt({ httpStatus: 403 });
+    assert.strictEqual(res403.canResume, false);
+    assert.strictEqual(res403.isTerminal, true);
+  });
+
+  await test('validateResumptionAttempt permits valid HTTP 200-299 responses and flags 500 as retryable non-terminal', () => {
+    const res200 = validateResumptionAttempt({ httpStatus: 200 });
+    assert.strictEqual(res200.canResume, true);
+    assert.strictEqual(res200.isTerminal, false);
+
+    const res503 = validateResumptionAttempt({ httpStatus: 503 });
+    assert.strictEqual(res503.canResume, false);
+    assert.strictEqual(res503.isTerminal, false);
+    assert.ok(res503.reason?.includes('Transient server error 503'));
+  });
+
+  await test('validateProtocolVersion allows supported protocol revisions', () => {
+    const msg = {
+      jsonrpc: '2.0',
+      id: 10,
+      method: 'tools/list',
+      params: {
+        _meta: {
+          'io.modelcontextprotocol/protocolVersion': '2026-07-28'
+        }
+      }
+    };
+    const check = validateProtocolVersion(msg, {
+      supportedVersions: ['2024-11-05', '2025-11-25', '2026-07-28']
+    });
+    assert.strictEqual(check.valid, true);
+    assert.strictEqual(check.requestedVersion, '2026-07-28');
+  });
+
+  await test('validateProtocolVersion rejects unsupported protocol version with JSON-RPC -32022 error (resolves #3179 / #3206)', () => {
+    const msg = {
+      jsonrpc: '2.0',
+      id: 11,
+      method: 'tools/call',
+      params: {
+        _meta: {
+          'io.modelcontextprotocol/protocolVersion': '2099-01-01'
+        }
+      }
+    };
+    const check = validateProtocolVersion(msg, {
+      supportedVersions: ['2026-07-28'],
+      pinnedVersion: '2026-07-28'
+    });
+    assert.strictEqual(check.valid, false);
+    assert.ok(check.jsonRpcError);
+    assert.strictEqual(check.jsonRpcError.error.code, MCP_ERROR_UNSUPPORTED_PROTOCOL);
+    assert.strictEqual(check.jsonRpcError.error.data.requested, '2099-01-01');
+    assert.deepStrictEqual(check.jsonRpcError.error.data.supported, ['2026-07-28']);
+  });
+
+  await test('validateProtocolVersion rejects missing protocolVersion on modern pinned connection', () => {
+    const msg = {
+      jsonrpc: '2.0',
+      id: 12,
+      method: 'tools/list',
+      params: {}
+    };
+    const check = validateProtocolVersion(msg, {
+      supportedVersions: ['2026-07-28'],
+      pinnedVersion: '2026-07-28'
+    });
+    assert.strictEqual(check.valid, false);
+    assert.strictEqual(check.jsonRpcError?.error.code, MCP_ERROR_UNSUPPORTED_PROTOCOL);
+  });
+
+  await test('validateClientCapabilities permits call when client declared required capabilities', () => {
+    const check = validateClientCapabilities(100, {
+      declaredCapabilities: { tools: {}, sampling: {} },
+      requiredCapabilities: ['sampling']
+    });
+    assert.strictEqual(check.valid, true);
+    assert.strictEqual(check.missingCapabilities.length, 0);
+  });
+
+  await test('validateClientCapabilities returns JSON-RPC -32021 when required capability is missing (resolves #3202)', () => {
+    const check = validateClientCapabilities(101, {
+      declaredCapabilities: { tools: {} },
+      requiredCapabilities: ['sampling', 'tasks']
+    });
+    assert.strictEqual(check.valid, false);
+    assert.deepStrictEqual(check.missingCapabilities, ['sampling', 'tasks']);
+    assert.ok(check.jsonRpcError);
+    assert.strictEqual(check.jsonRpcError.error.code, MCP_ERROR_MISSING_CAPABILITY);
+    assert.deepStrictEqual(check.jsonRpcError.error.data.requiredCapabilities, ['sampling', 'tasks']);
+  });
+
+  await test('createTerminalStreamError constructs compliant SSE JSON-RPC error frame', () => {
+    const frame = createTerminalStreamError('msg-abc', -32603, 'Internal server stream termination');
+    assert.ok(frame.startsWith('data: '));
+    assert.ok(frame.endsWith('\n\n'));
+    const parsed = JSON.parse(frame.slice(6).trim());
+    assert.strictEqual(parsed.jsonrpc, '2.0');
+    assert.strictEqual(parsed.id, 'msg-abc');
+    assert.strictEqual(parsed.error.code, -32603);
+    assert.strictEqual(parsed.error.message, 'Internal server stream termination');
   });
 
   // Summary
