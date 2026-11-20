@@ -136,6 +136,12 @@ import {
 import {
   MemoryQuarantineManager
 } from '../pro_pack/memory_quarantine_remediation.ts';
+import {
+  schemaAcceptsString,
+  schemaRequiresCollection,
+  normalizePolymorphicArguments,
+  createDiagnosticError
+} from '../pro_pack/polymorphic_argument_guard.ts';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -3486,6 +3492,119 @@ async function runProPackTestSuite() {
     const purged = manager.purgeQuarantined();
     assert.strictEqual(purged, 2);
     assert.strictEqual(manager.listQuarantined().length, 0);
+  });
+
+  // ==========================================
+  // Module 27: Polymorphic Argument & Nullable String Preservation Guard
+  // ==========================================
+  console.log('\n[Module: Polymorphic Argument & Nullable String Preservation Guard]');
+
+  await test('schemaAcceptsString accurately recognizes string-accepting schemas', () => {
+    assert.strictEqual(schemaAcceptsString({ type: 'string' }), true);
+    assert.strictEqual(schemaAcceptsString({ type: ['string', 'null'] }), true);
+    assert.strictEqual(schemaAcceptsString({ anyOf: [{ type: 'string' }, { type: 'null' }] }), true);
+    assert.strictEqual(schemaAcceptsString({ oneOf: [{ type: 'string' }, { type: 'object' }] }), true);
+    assert.strictEqual(schemaAcceptsString({ type: 'integer' }), false);
+    assert.strictEqual(schemaAcceptsString({ type: 'object' }), false);
+    assert.strictEqual(schemaAcceptsString({ anyOf: [{ type: 'number' }, { type: 'boolean' }] }), false);
+  });
+
+  await test('schemaRequiresCollection identifies pure collection schemas', () => {
+    assert.strictEqual(schemaRequiresCollection({ type: 'object' }), true);
+    assert.strictEqual(schemaRequiresCollection({ type: 'array' }), true);
+    assert.strictEqual(schemaRequiresCollection({ anyOf: [{ type: 'string' }, { type: 'null' }] }), false);
+    assert.strictEqual(schemaRequiresCollection({ type: 'string' }), false);
+  });
+
+  await test('normalizePolymorphicArguments preserves string "null" for nullable string fields (resolves servers #5176)', () => {
+    const schemas = {
+      base_branch: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+      contains: { anyOf: [{ type: 'string' }, { type: 'null' }] }
+    };
+
+    const res = normalizePolymorphicArguments({
+      base_branch: 'null',
+      contains: 'feature-branch'
+    }, { parameterSchemas: schemas });
+
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(res.arguments.base_branch, 'null');
+    assert.strictEqual(typeof res.arguments.base_branch, 'string');
+    assert.strictEqual(res.preservedStringFields.includes('base_branch'), true);
+    assert.strictEqual(res.coercedFields.length, 0);
+  });
+
+  await test('normalizePolymorphicArguments preserves JSON-in-string payloads for str | null (resolves python-sdk #3055)', () => {
+    const schemas = {
+      body: { anyOf: [{ type: 'string' }, { type: 'null' }] }
+    };
+
+    const jsonTemplate = '{"blocks": [{"id": 1, "text": "hello"}]}';
+    const res = normalizePolymorphicArguments({
+      body: jsonTemplate
+    }, { parameterSchemas: schemas });
+
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(res.arguments.body, jsonTemplate);
+    assert.strictEqual(typeof res.arguments.body, 'string');
+    assert.strictEqual(res.preservedStringFields.includes('body'), true);
+  });
+
+  await test('normalizePolymorphicArguments pre-parses stringified collections when schema requires it', () => {
+    const schemas = {
+      tags: { type: 'array', items: { type: 'string' } },
+      config: { type: 'object' }
+    };
+
+    const res = normalizePolymorphicArguments({
+      tags: '["frontend", "production"]',
+      config: '{"port": 8080, "ssl": true}'
+    }, { parameterSchemas: schemas });
+
+    assert.strictEqual(res.success, true);
+    assert.deepStrictEqual(res.arguments.tags, ['frontend', 'production']);
+    assert.deepStrictEqual(res.arguments.config, { port: 8080, ssl: true });
+    assert.strictEqual(res.coercedFields.includes('tags'), true);
+    assert.strictEqual(res.coercedFields.includes('config'), true);
+  });
+
+  await test('normalizePolymorphicArguments returns structured error on malformed stringified collection in strict mode', () => {
+    const schemas = {
+      tags: { type: 'array' }
+    };
+
+    const res = normalizePolymorphicArguments({
+      tags: '[invalid json,'
+    }, { parameterSchemas: schemas, strictCollections: true });
+
+    assert.strictEqual(res.success, false);
+    assert.ok(res.errors?.tags);
+  });
+
+  await test('createDiagnosticError preserves underlying error cause and diagnostic tail (resolves servers #5636)', () => {
+    const underlying = new Error('fatal: Needed a single revision');
+    const diagError = createDiagnosticError('DEFAULT_BASE_BRANCH could not be resolved', {
+      cause: underlying,
+      command: 'git rev-parse --verify origin/v2/main',
+      exitCode: 128,
+      stderr: 'fatal: Needed a single revision',
+      hint: 'Run git fetch origin v2/main'
+    });
+
+    assert.strictEqual(diagError.cause, underlying);
+    assert.strictEqual(diagError.exitCode, 128);
+    assert.ok(diagError.message.includes('git rev-parse --verify origin/v2/main'));
+    assert.ok(diagError.message.includes('exited with code 128'));
+    assert.ok(diagError.message.includes('fatal: Needed a single revision'));
+    assert.ok(diagError.message.includes('Run git fetch origin v2/main'));
+  });
+
+  await test('normalizePolymorphicArguments preserves un-annotated freeform string arguments', () => {
+    const res = normalizePolymorphicArguments({ message: 'plain string content', count: 42 });
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(res.arguments.message, 'plain string content');
+    assert.strictEqual(res.arguments.count, 42);
+    assert.strictEqual(res.preservedStringFields.includes('message'), true);
   });
 
   // Summary
