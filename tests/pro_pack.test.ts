@@ -142,6 +142,13 @@ import {
   normalizePolymorphicArguments,
   createDiagnosticError
 } from '../pro_pack/polymorphic_argument_guard.ts';
+import {
+  isInputRequiredResult,
+  validateToolOutputWithElicitation,
+  sanitizeRefIdentifier,
+  parseAndSanitizeRefList,
+  ElicitationSessionTracker
+} from '../pro_pack/intermediate_elicitation_guard.ts';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -3605,6 +3612,139 @@ async function runProPackTestSuite() {
     assert.strictEqual(res.arguments.message, 'plain string content');
     assert.strictEqual(res.arguments.count, 42);
     assert.strictEqual(res.preservedStringFields.includes('message'), true);
+  });
+
+  // ==========================================
+  // Module 28: Intermediate Elicitation & Clean Ref Output Guard
+  // ==========================================
+  console.log('\n[Module: Intermediate Elicitation & Clean Ref Output Guard]');
+
+  await test('isInputRequiredResult accurately identifies elicitation responses', () => {
+    assert.strictEqual(isInputRequiredResult({ resultType: 'input_required' }), true);
+    assert.strictEqual(isInputRequiredResult({ inputRequests: { confirm: { method: 'elicitation/create', params: { message: 'ok?' } } } }), true);
+    assert.strictEqual(isInputRequiredResult({ content: [{ type: 'text', text: 'done' }] }), false);
+    assert.strictEqual(isInputRequiredResult(null), false);
+    assert.strictEqual(isInputRequiredResult(undefined), false);
+  });
+
+  await test('validateToolOutputWithElicitation allows input_required without outputSchema crash (resolves #3216)', () => {
+    const mockValidator = (data: any) => {
+      if (typeof data?.id === 'number') return { valid: true };
+      return { valid: false, errors: ['id must be a number'] };
+    };
+
+    const intermediateResult = {
+      _meta: { serverInfo: { name: 'test-server', version: '1.0' } },
+      resultType: 'input_required',
+      inputRequests: {
+        confirmation: {
+          method: 'elicitation/create',
+          params: { message: 'Delete item 7?' }
+        }
+      }
+    };
+
+    const outcome = validateToolOutputWithElicitation(intermediateResult, mockValidator);
+    assert.strictEqual(outcome.valid, true);
+    assert.strictEqual(outcome.isIntermediate, true);
+    assert.strictEqual(outcome.error, undefined);
+  });
+
+  await test('validateToolOutputWithElicitation enforces outputSchema on final completed result', () => {
+    const mockValidator = (data: any) => {
+      if (typeof data?.id === 'number') return { valid: true };
+      return { valid: false, errors: ['id must be a number'] };
+    };
+
+    // Valid completed result
+    const validResult = {
+      content: [{ type: 'text', text: '{"id": 7}' }],
+      structuredContent: { id: 7 }
+    };
+    const validOutcome = validateToolOutputWithElicitation(validResult, mockValidator);
+    assert.strictEqual(validOutcome.valid, true);
+    assert.strictEqual(validOutcome.isIntermediate, false);
+
+    // Missing structuredContent
+    const missingResult = {
+      content: [{ type: 'text', text: '{"id": 7}' }]
+    };
+    const missingOutcome = validateToolOutputWithElicitation(missingResult, mockValidator);
+    assert.strictEqual(missingOutcome.valid, false);
+    assert.strictEqual(missingOutcome.errorCode, -32600);
+    assert.ok(missingOutcome.error?.includes('Tool has an output schema but did not return structured content'));
+
+    // Invalid schema content
+    const invalidResult = {
+      content: [{ type: 'text', text: '{"id": "seven"}' }],
+      structuredContent: { id: 'seven' }
+    };
+    const invalidOutcome = validateToolOutputWithElicitation(invalidResult, mockValidator);
+    assert.strictEqual(invalidOutcome.valid, false);
+    assert.ok(invalidOutcome.error?.includes('id must be a number'));
+  });
+
+  await test('validateToolOutputWithElicitation permits error results without structuredContent', () => {
+    const mockValidator = () => ({ valid: true });
+    const errorResult = {
+      isError: true,
+      content: [{ type: 'text', text: 'Database unreachable' }]
+    };
+    const outcome = validateToolOutputWithElicitation(errorResult, mockValidator);
+    assert.strictEqual(outcome.valid, true);
+    assert.strictEqual(outcome.isIntermediate, false);
+  });
+
+  await test('sanitizeRefIdentifier strips CLI markers, ANSI escapes, and quotes (resolves servers #5641)', () => {
+    assert.strictEqual(sanitizeRefIdentifier('* main'), 'main');
+    assert.strictEqual(sanitizeRefIdentifier('+ feature/auth'), 'feature/auth');
+    assert.strictEqual(sanitizeRefIdentifier('  release/v2  '), 'release/v2');
+    assert.strictEqual(sanitizeRefIdentifier('\u001b[32m* develop\u001b[0m'), 'develop');
+    assert.strictEqual(sanitizeRefIdentifier('"hotfix-1"'), 'hotfix-1');
+    assert.strictEqual(sanitizeRefIdentifier("'feature/checkout'"), 'feature/checkout');
+    assert.strictEqual(sanitizeRefIdentifier(''), '');
+  });
+
+  await test('parseAndSanitizeRefList parses multi-line branch output and identifies active branch', () => {
+    const raw = '  feature-auth\r\n* main\r\n  staging\r\n  + pr-branch';
+    const parsed = parseAndSanitizeRefList(raw);
+
+    assert.deepStrictEqual(parsed.cleanRefs, ['feature-auth', 'main', 'staging', 'pr-branch']);
+    assert.strictEqual(parsed.activeRef, 'main');
+  });
+
+  await test('ElicitationSessionTracker manages token lifecycle, validation, and expiry', () => {
+    const tracker = new ElicitationSessionTracker(60_000); // 1 minute TTL
+
+    const session = tracker.createSession('delete_database', {
+      confirmation: { method: 'elicitation/create', params: { message: 'Confirm DROP?' } }
+    });
+
+    assert.ok(session.requestState.length > 20);
+    assert.ok(session.expiresAt > Date.now());
+
+    // Successful validation
+    const validOutcome = tracker.validateSession(session.requestState, {
+      confirmation: { action: 'accept', content: {} }
+    });
+    assert.strictEqual(validOutcome.valid, true);
+    assert.strictEqual(validOutcome.toolName, 'delete_database');
+
+    // Missing response key
+    const missingOutcome = tracker.validateSession(session.requestState, {});
+    assert.strictEqual(missingOutcome.valid, false);
+    assert.ok(missingOutcome.error?.includes('Missing response for requested prompt'));
+
+    // Unknown token
+    const unknownOutcome = tracker.validateSession('non-existent-token', {});
+    assert.strictEqual(unknownOutcome.valid, false);
+
+    // Consume session
+    tracker.consumeSession(session.requestState);
+    const consumedOutcome = tracker.validateSession(session.requestState, {
+      confirmation: { action: 'accept' }
+    });
+    assert.strictEqual(consumedOutcome.valid, false);
   });
 
   // Summary
