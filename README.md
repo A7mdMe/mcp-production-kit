@@ -33,6 +33,7 @@
 | **Stdio Lifecycle & Epoch Fence** | - | **Monotonic epoch fence, eliminates Connection closed races & reaps orphans** |
 | **Client Session Invariants** | - | **Fail-closed discovery on closed client, prevents hallucinated empty tools** |
 | **Subscription Router Guard** | - | **Zero-slot graceful completion for unadvertised filters, prevents DoS** |
+| **Memory Quarantine Guard** | - | **Corrupted record isolation, auto-repair & quarantine ledger (#5609)** |
 | **Container Lifecycle Guard** | - | **Universal PID 1 signals, drain hooks & probes (#5611)** |
 | **File Lock & Memory Guard** | - | **Atomic ABA race-free stale lock clearing & PID liveness (#5624)** |
 | **Stream Resumption Guard** | - | **Fail-fast on premature close (#3210); -32022/-32021 checks (#3179, #3202)** |
@@ -145,8 +146,9 @@ docker run -p 3000:3000 -e TRANSPORT=sse mcp-production-kit
 
 ## Commercial Pro Pack ($19 One-Time)
 
-For production cloud deployments, multi-agent frameworks, and enterprise teams, the **Pro Pack** provides drop-in, battle-tested extensions with 253 dedicated automated unit tests (267 total across the project):
+For production cloud deployments, multi-agent frameworks, and enterprise teams, the **Pro Pack** provides drop-in, battle-tested extensions with 260 dedicated automated unit tests (274 total across the project):
 
+* **Knowledge Graph Quarantine & Memory Remediation Guard:** Eliminates unrecoverable memory file bloat and quota exhaustion caused by corrupted or malformed lines perpetually preserved on save (servers #5609). Features self-healing schema normalization (missing entityType, non-string observations), automatic segregation of unparseable lines into an isolated quarantine ledger (<memory>.quarantine.jsonl), and dedicated tools for autonomous inspection, repair, and purging.
 * **Container & Process Lifecycle Guard:** Eliminates Docker container 10-second stop timeouts (exit 137) by installing universal PID 1 SIGTERM and SIGINT listeners across both stdio and HTTP/SSE transports (servers #5611). Coordinates graceful drain hooks with bounded deadlines, provides container orchestrator readiness probes (/readyz 503 during drain), and bundles a hardened non-root tini Alpine Dockerfile template.
 * **Cross-Process Resilient File & Memory Lock Guard:** Eliminates critical ABA race conditions where concurrent stale-lock breakers inadvertently delete newly acquired live guards in shared agent memories and file-based state stores (servers #5624). Features atomic rename-aside staging, inode/device handle pinning, monotonic generation tokens, and cross-platform PID liveness detection to break deadlocks safely.
 * **Stream Resumption, Truncation & Protocol Negotiation Guard:** Eliminates 30s-60s agent hangs by instantly aborting pending requests with `ConnectionClosed` when Streamable HTTP per-request SSE streams close prematurely (typescript-sdk #3210). Validates resumption token endpoints against terminal HTTP 405/404/410/403 rejections, intercepts unsupported protocol versions on pinned stdio connections with standard JSON-RPC -32022 errors (#3179, #3206), and enforces client capability preconditions with JSON-RPC -32021 errors (#3202).
@@ -173,7 +175,7 @@ For production cloud deployments, multi-agent frameworks, and enterprise teams, 
 * **Cloudflare Workers & Docker Compose:** Serverless edge hosting with streaming SSE, plus unprivileged non-root container deployment.
 
 **[Get Pro Pack ($19.00 USD) — Instant Checkout on Whop](https://whop.com/checkout/plan_eiKHeRpooY3yc)**  
-*(Delivery: Instant download of `mcp-pro-pack-v3.2.0.zip` via Whop Files and customer billing portal upon completion).*
+*(Delivery: Instant download of `mcp-pro-pack-v3.3.0.zip` via Whop Files and customer billing portal upon completion).*
 
 ---
 
