@@ -33,6 +33,7 @@
 | **Stdio Lifecycle & Epoch Fence** | - | **Monotonic epoch fence, eliminates Connection closed races & reaps orphans** |
 | **Client Session Invariants** | - | **Fail-closed discovery on closed client, prevents hallucinated empty tools** |
 | **Subscription Router Guard** | - | **Zero-slot graceful completion for unadvertised filters, prevents DoS** |
+| **Intermediate Elicitation Guard** | - | **Bypasses outputSchema crash on input_required (#3216); sanitizes CLI refs (#5641)** |
 | **Polymorphic Argument Guard** | - | **Preserves string "null" & JSON-in-string for union schemas (#3055, #5176)** |
 | **Memory Quarantine Guard** | - | **Corrupted record isolation, auto-repair & quarantine ledger (#5609)** |
 | **Container Lifecycle Guard** | - | **Universal PID 1 signals, drain hooks & probes (#5611)** |
@@ -147,8 +148,9 @@ docker run -p 3000:3000 -e TRANSPORT=sse mcp-production-kit
 
 ## Commercial Pro Pack ($19 One-Time)
 
-For production cloud deployments, multi-agent frameworks, and enterprise teams, the **Pro Pack** provides drop-in, battle-tested extensions with 268 dedicated automated unit tests (282 total across the project):
+For production cloud deployments, multi-agent frameworks, and enterprise teams, the **Pro Pack** provides drop-in, battle-tested extensions with 275 dedicated automated unit tests (289 total across the project):
 
+* **Intermediate Elicitation & Clean Ref Output Guard:** Resolves premature outputSchema validation crashes when tools return intermediate human-in-the-loop elicitation requests (resultType: input_required, typescript-sdk #3216). Manages cryptographic requestState nonces and TTL deadlines, and provides deterministic ref sanitization that strips CLI markers (* main, + feature), ANSI escapes, and quotes to prevent downstream tool chaining failures (servers #5641).
 * **Polymorphic Argument & Nullable String Preservation Guard:** Prevents silent argument corruption and premature JSON parsing across MCP tool arguments (python-sdk #3055, servers #5176). Features union-aware schema traversal (anyOf, oneOf, type arrays) that automatically preserves stringified JSON and literal "null" parameters for nullable string annotations, enables safe fallback deserialization for strictly collection schemas, and preserves underlying error causes and stderr diagnostic tails for subprocess failures (servers #5636).
 * **Knowledge Graph Quarantine & Memory Remediation Guard:** Eliminates unrecoverable memory file bloat and quota exhaustion caused by corrupted or malformed lines perpetually preserved on save (servers #5609). Features self-healing schema normalization (missing entityType, non-string observations), automatic segregation of unparseable lines into an isolated quarantine ledger (<memory>.quarantine.jsonl), and dedicated tools for autonomous inspection, repair, and purging.
 * **Container & Process Lifecycle Guard:** Eliminates Docker container 10-second stop timeouts (exit 137) by installing universal PID 1 SIGTERM and SIGINT listeners across both stdio and HTTP/SSE transports (servers #5611). Coordinates graceful drain hooks with bounded deadlines, provides container orchestrator readiness probes (/readyz 503 during drain), and bundles a hardened non-root tini Alpine Dockerfile template.
@@ -177,7 +179,7 @@ For production cloud deployments, multi-agent frameworks, and enterprise teams, 
 * **Cloudflare Workers & Docker Compose:** Serverless edge hosting with streaming SSE, plus unprivileged non-root container deployment.
 
 **[Get Pro Pack ($19.00 USD) — Instant Checkout on Whop](https://whop.com/checkout/plan_eiKHeRpooY3yc)**  
-*(Delivery: Instant download of `mcp-pro-pack-v3.4.0.zip` via Whop Files and customer billing portal upon completion).*
+*(Delivery: Instant download of `mcp-pro-pack-v3.5.0.zip` via Whop Files and customer billing portal upon completion).*
 
 ---
 
