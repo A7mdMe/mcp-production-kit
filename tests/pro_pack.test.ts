@@ -133,6 +133,9 @@ import {
 import {
   ContainerLifecycleManager
 } from '../pro_pack/container_lifecycle_guard.ts';
+import {
+  MemoryQuarantineManager
+} from '../pro_pack/memory_quarantine_remediation.ts';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -3358,6 +3361,131 @@ async function runProPackTestSuite() {
     uninstall();
     assert.strictEqual(fakeProcess.listenerCount('SIGTERM'), 0);
     assert.strictEqual(fakeProcess.listenerCount('SIGINT'), 0);
+  });
+
+  // ==========================================
+  // Module 26: Knowledge Graph Quarantine & Memory Remediation Guard
+  // ==========================================
+  console.log('\n[Module: Knowledge Graph Quarantine & Memory Remediation Guard]');
+
+  const memTestDir = path.join(os.tmpdir(), `mcp-mem-test-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`);
+  fs.mkdirSync(memTestDir, { recursive: true });
+
+  await test('evaluateLine passes valid entity and relation records cleanly', () => {
+    const manager = new MemoryQuarantineManager('/dummy/path');
+    const validEntity = JSON.stringify({ type: 'entity', name: 'Alice', entityType: 'person', observations: ['Software engineer'] });
+    const resEntity = manager.evaluateLine(validEntity, 1);
+    assert.strictEqual(resEntity.status, 'VALID_ENTITY');
+    assert.strictEqual(resEntity.record.name, 'Alice');
+
+    const validRel = JSON.stringify({ type: 'relation', from: 'Alice', to: 'ProjectX', relationType: 'contributor' });
+    const resRel = manager.evaluateLine(validRel, 2);
+    assert.strictEqual(resRel.status, 'VALID_RELATION');
+    assert.strictEqual(resRel.record.from, 'Alice');
+  });
+
+  await test('evaluateLine self-heals entity missing entityType and non-string observations', () => {
+    const manager = new MemoryQuarantineManager('/dummy/path');
+    const sloppyEntity = JSON.stringify({
+      type: 'entity',
+      name: 'ServerNode',
+      observations: [12345, { ip: '10.0.0.1' }, true]
+    });
+    const res = manager.evaluateLine(sloppyEntity, 10);
+    assert.strictEqual(res.status, 'REPAIRED_ENTITY');
+    assert.strictEqual(res.record.entityType, 'concept');
+    assert.deepStrictEqual(res.record.observations, ['12345', '{"ip":"10.0.0.1"}', 'true']);
+  });
+
+  await test('evaluateLine self-heals relation missing relationType', () => {
+    const manager = new MemoryQuarantineManager('/dummy/path');
+    const sloppyRel = JSON.stringify({ from: 'NodeA', to: 'NodeB' });
+    const res = manager.evaluateLine(sloppyRel, 11);
+    assert.strictEqual(res.status, 'REPAIRED_RELATION');
+    assert.strictEqual(res.record.relationType, 'related_to');
+  });
+
+  await test('evaluateLine flags malformed JSON, primitives, and null for quarantine (resolves #5609)', () => {
+    const manager = new MemoryQuarantineManager('/dummy/path');
+    assert.strictEqual(manager.evaluateLine('not a json line', 1).status, 'QUARANTINE');
+    assert.strictEqual(manager.evaluateLine('42', 2).status, 'QUARANTINE');
+    assert.strictEqual(manager.evaluateLine('null', 3).status, 'QUARANTINE');
+    assert.strictEqual(manager.evaluateLine('[1, 2, 3]', 4).status, 'QUARANTINE');
+    assert.strictEqual(manager.evaluateLine('{"type":"note","body":"not in schema"}', 5).status, 'QUARANTINE');
+  });
+
+  await test('ingestAndSanitize separates corrupt lines to quarantine without dropping data', () => {
+    const memFile = path.join(memTestDir, 'active_memory.jsonl');
+    const fileContent = [
+      JSON.stringify({ type: 'entity', name: 'ValidUser', entityType: 'user', observations: ['Admin'] }),
+      'broken non-json string line 2',
+      JSON.stringify({ type: 'relation', from: 'ValidUser', to: 'AuthService', relationType: 'accesses' }),
+      '{"type":"entity","observations":["missing name field"]}',
+      JSON.stringify({ name: 'AutoHealedItem', observations: ['auto repaired entityType'] })
+    ].join('\n') + '\n';
+
+    fs.writeFileSync(memFile, fileContent, 'utf8');
+
+    const manager = new MemoryQuarantineManager(memFile);
+    const result = manager.ingestAndSanitize();
+
+    assert.strictEqual(result.validEntities.length, 2);
+    assert.strictEqual(result.validRelations.length, 1);
+    assert.strictEqual(result.repairedCount, 1);
+    assert.strictEqual(result.quarantinedCount, 2);
+
+    // Verify quarantine file contents
+    const qList = manager.listQuarantined();
+    assert.strictEqual(qList.length, 2);
+    assert.strictEqual(qList[0].originalLineNumber, 2);
+    assert.strictEqual(qList[0].detectedIssue, 'MALFORMED_JSON');
+    assert.strictEqual(qList[1].detectedIssue, 'MISSING_ENTITY_NAME');
+
+    // Verify active file now contains only valid lines
+    const activeContent = fs.readFileSync(memFile, 'utf8');
+    assert.strictEqual(activeContent.includes('broken non-json string'), false);
+    assert.strictEqual(activeContent.includes('ValidUser'), true);
+    assert.strictEqual(activeContent.includes('AutoHealedItem'), true);
+  });
+
+  await test('repairQuarantinedRecord restores a quarantined item to the active graph', () => {
+    const memFile = path.join(memTestDir, 'repair_memory.jsonl');
+    fs.writeFileSync(memFile, 'corrupt item\n', 'utf8');
+
+    const manager = new MemoryQuarantineManager(memFile);
+    manager.ingestAndSanitize();
+
+    const qList = manager.listQuarantined();
+    assert.strictEqual(qList.length, 1);
+    const targetQId = qList[0].quarantineId;
+
+    const success = manager.repairQuarantinedRecord(targetQId, {
+      type: 'entity',
+      entity: {
+        name: 'RestoredEntity',
+        entityType: 'service',
+        observations: ['Manually/LLM repaired']
+      }
+    });
+
+    assert.strictEqual(success, true);
+    assert.strictEqual(manager.listQuarantined().length, 0);
+
+    const activeContent = fs.readFileSync(memFile, 'utf8');
+    assert.strictEqual(activeContent.includes('RestoredEntity'), true);
+  });
+
+  await test('purgeQuarantined clears the quarantine sidecar file', () => {
+    const memFile = path.join(memTestDir, 'purge_memory.jsonl');
+    fs.writeFileSync(memFile, 'bad line 1\nbad line 2\n', 'utf8');
+
+    const manager = new MemoryQuarantineManager(memFile);
+    manager.ingestAndSanitize();
+    assert.strictEqual(manager.listQuarantined().length, 2);
+
+    const purged = manager.purgeQuarantined();
+    assert.strictEqual(purged, 2);
+    assert.strictEqual(manager.listQuarantined().length, 0);
   });
 
   // Summary
