@@ -149,6 +149,12 @@ import {
   parseAndSanitizeRefList,
   ElicitationSessionTracker
 } from '../pro_pack/intermediate_elicitation_guard.ts';
+import {
+  parseDiscoveryMetadata,
+  revokeOAuthToken,
+  introspectOAuthToken,
+  OAuthTokenLifecycleManager
+} from '../pro_pack/oauth_revocation_guard.ts';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -3745,6 +3751,174 @@ async function runProPackTestSuite() {
       confirmation: { action: 'accept' }
     });
     assert.strictEqual(consumedOutcome.valid, false);
+  });
+
+  // ==========================================
+  // Module 29: OIDC / OAuth Token Revocation, Introspection & Discovery Metadata Guard
+  // ==========================================
+  console.log('\n[Module: OIDC / OAuth Token Revocation, Introspection & Discovery Metadata Guard]');
+
+  await test('parseDiscoveryMetadata preserves revocation_endpoint and introspection_endpoint from OIDC discovery (resolves #3213)', () => {
+    const cognitoOidcDoc = {
+      issuer: 'https://cognito-idp.us-east-1.amazonaws.com/us-east-1_example',
+      authorization_endpoint: 'https://example.auth.us-east-1.amazoncognito.com/oauth2/authorize',
+      token_endpoint: 'https://example.auth.us-east-1.amazoncognito.com/oauth2/token',
+      jwks_uri: 'https://cognito-idp.us-east-1.amazonaws.com/us-east-1_example/.well-known/jwks.json',
+      response_types_supported: ['code', 'token'],
+      subject_types_supported: ['public'],
+      id_token_signing_alg_values_supported: ['RS256'],
+      code_challenge_methods_supported: ['S256'],
+      revocation_endpoint: 'https://example.auth.us-east-1.amazoncognito.com/oauth2/revoke',
+      introspection_endpoint: 'https://example.auth.us-east-1.amazoncognito.com/oauth2/introspect',
+      end_session_endpoint: 'https://example.auth.us-east-1.amazoncognito.com/logout'
+    };
+
+    const metadata = parseDiscoveryMetadata(cognitoOidcDoc);
+    assert.strictEqual(metadata.revocation_endpoint, 'https://example.auth.us-east-1.amazoncognito.com/oauth2/revoke');
+    assert.strictEqual(metadata.introspection_endpoint, 'https://example.auth.us-east-1.amazoncognito.com/oauth2/introspect');
+    assert.strictEqual(metadata.end_session_endpoint, 'https://example.auth.us-east-1.amazoncognito.com/logout');
+    assert.strictEqual(metadata.issuer, cognitoOidcDoc.issuer);
+  });
+
+  await test('parseDiscoveryMetadata rejects documents missing core endpoints', () => {
+    assert.throws(() => parseDiscoveryMetadata(null), /must be a non-null object/);
+    assert.throws(() => parseDiscoveryMetadata({ issuer: 'https://issuer.com' }), /Missing or invalid "authorization_endpoint"/);
+  });
+
+  await test('revokeOAuthToken issues RFC 7009 compliant POST with Basic auth', async () => {
+    let capturedUrl = '';
+    let capturedHeaders: any = {};
+    let capturedBody = '';
+
+    const mockFetch = async (url: any, opts: any) => {
+      capturedUrl = String(url);
+      capturedHeaders = opts.headers;
+      capturedBody = opts.body;
+      return {
+        status: 200,
+        ok: true,
+        text: async () => ''
+      } as any;
+    };
+
+    const result = await revokeOAuthToken(
+      'https://auth.example.com/oauth2/revoke',
+      {
+        token: 'access_token_xyz_123',
+        tokenTypeHint: 'access_token',
+        clientId: 'client_app_id',
+        clientSecret: 'secret_key_456',
+        authMethod: 'client_secret_basic'
+      },
+      mockFetch as any
+    );
+
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.status, 200);
+    assert.strictEqual(result.revocationSupported, true);
+    assert.strictEqual(capturedUrl, 'https://auth.example.com/oauth2/revoke');
+    assert.strictEqual(capturedHeaders['Content-Type'], 'application/x-www-form-urlencoded');
+    assert.ok(capturedHeaders['Authorization'].startsWith('Basic '));
+    assert.ok(capturedBody.includes('token=access_token_xyz_123'));
+    assert.ok(capturedBody.includes('token_type_hint=access_token'));
+  });
+
+  await test('revokeOAuthToken supports client_secret_post and form parameters', async () => {
+    let capturedBody = '';
+
+    const mockFetch = async (_url: any, opts: any) => {
+      capturedBody = opts.body;
+      return { status: 200, ok: true, text: async () => '' } as any;
+    };
+
+    const result = await revokeOAuthToken(
+      'https://auth.example.com/oauth2/revoke',
+      {
+        token: 'refresh_token_abc',
+        tokenTypeHint: 'refresh_token',
+        clientId: 'public_client_1',
+        authMethod: 'client_secret_post'
+      },
+      mockFetch as any
+    );
+
+    assert.strictEqual(result.success, true);
+    assert.ok(capturedBody.includes('client_id=public_client_1'));
+    assert.ok(capturedBody.includes('token_type_hint=refresh_token'));
+  });
+
+  await test('revokeOAuthToken handles IdP without revocation_endpoint gracefully', async () => {
+    const result = await revokeOAuthToken(undefined, { token: 'tok_123' });
+    assert.strictEqual(result.success, false);
+    assert.strictEqual(result.revocationSupported, false);
+    assert.ok(result.error?.includes('does not advertise revocation_endpoint'));
+  });
+
+  await test('introspectOAuthToken queries RFC 7662 endpoint and parses active token claims', async () => {
+    const mockFetch = async () => {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          active: true,
+          scope: 'read write mcp:tools',
+          sub: 'user_agent_88',
+          client_id: 'client_app_1',
+          exp: Math.floor(Date.now() / 1000) + 3600
+        })
+      } as any;
+    };
+
+    const res = await introspectOAuthToken(
+      'https://auth.example.com/oauth2/introspect',
+      'bearer_token_val',
+      { clientId: 'svc', clientSecret: 'pass' },
+      mockFetch as any
+    );
+
+    assert.strictEqual(res.active, true);
+    assert.strictEqual(res.sub, 'user_agent_88');
+    assert.strictEqual(res.scope, 'read write mcp:tools');
+  });
+
+  await test('OAuthTokenLifecycleManager caches metadata and executes end-to-end logout & revocation', async () => {
+    let fetchCount = 0;
+    const mockFetch = async (url: any) => {
+      fetchCount++;
+      const urlStr = String(url);
+      if (urlStr.includes('/.well-known/openid-configuration')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            issuer: 'https://idp.example.com',
+            authorization_endpoint: 'https://idp.example.com/auth',
+            token_endpoint: 'https://idp.example.com/token',
+            jwks_uri: 'https://idp.example.com/jwks',
+            revocation_endpoint: 'https://idp.example.com/revoke'
+          })
+        } as any;
+      }
+      if (urlStr.includes('/revoke')) {
+        return { status: 200, ok: true, text: async () => '' } as any;
+      }
+      return { ok: false, status: 404 } as any;
+    };
+
+    const manager = new OAuthTokenLifecycleManager();
+
+    // First resolve
+    const meta1 = await manager.resolveMetadata('https://idp.example.com', mockFetch as any);
+    assert.strictEqual(meta1.revocation_endpoint, 'https://idp.example.com/revoke');
+
+    // Second resolve hits cache
+    const meta2 = await manager.resolveMetadata('https://idp.example.com', mockFetch as any);
+    assert.strictEqual(meta2.revocation_endpoint, 'https://idp.example.com/revoke');
+
+    // Logout and revoke
+    const revResult = await manager.logoutAndRevoke('https://idp.example.com', 'active_token_999', {}, mockFetch as any);
+    assert.strictEqual(revResult.success, true);
+    assert.strictEqual(revResult.status, 200);
   });
 
   // Summary
