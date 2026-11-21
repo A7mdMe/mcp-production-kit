@@ -33,6 +33,7 @@
 | **Stdio Lifecycle & Epoch Fence** | - | **Monotonic epoch fence, eliminates Connection closed races & reaps orphans** |
 | **Client Session Invariants** | - | **Fail-closed discovery on closed client, prevents hallucinated empty tools** |
 | **Subscription Router Guard** | - | **Zero-slot graceful completion for unadvertised filters, prevents DoS** |
+| **SSE Stream Priming Guard** | - | **Immediate t=0 event ID priming & gapless Last-Event-ID replay for GET streams (#3211)** |
 | **OAuth Token Revocation Guard** | - | **RFC 7009 revocation, RFC 7662 introspection & OIDC metadata preservation (#3213)** |
 | **Intermediate Elicitation Guard** | - | **Bypasses outputSchema crash on input_required (#3216); sanitizes CLI refs (#5641)** |
 | **Polymorphic Argument Guard** | - | **Preserves string "null" & JSON-in-string for union schemas (#3055, #5176)** |
@@ -149,8 +150,9 @@ docker run -p 3000:3000 -e TRANSPORT=sse mcp-production-kit
 
 ## Commercial Pro Pack ($19 One-Time)
 
-For production cloud deployments, multi-agent frameworks, and enterprise teams, the **Pro Pack** provides drop-in, battle-tested extensions with 282 dedicated automated unit tests (296 total across the project):
+For production cloud deployments, multi-agent frameworks, and enterprise teams, the **Pro Pack** provides drop-in, battle-tested extensions with 289 dedicated automated unit tests (303 total across the project):
 
+* **Standalone SSE Stream Priming, Resumption & Gapless Replay Guard:** Eliminates silent notification loss on standalone GET SSE streams during proxy timeouts and connection rotations (typescript-sdk #3211). Automatically writes an initial spec-compliant priming frame (id: <streamId>_1, retry: <interval>) at t=0 so clients always retain a resumption ID, filters priming frames from application data, and performs gapless event replay upon reconnection with Last-Event-ID.
 * **OIDC / OAuth Token Revocation, Introspection & Discovery Metadata Guard:** Eliminates zombie token persistence and authorization leaks by preserving RFC 7009 revocation_endpoint and RFC 7662 introspection_endpoint during OpenID Connect discovery (typescript-sdk #3213). Includes automated token lifecycle management with client_secret_basic and client_secret_post support to ensure tokens are actively revoked on IdPs (Cognito, Okta, Keycloak) when clients log out.
 * **Intermediate Elicitation & Clean Ref Output Guard:** Resolves premature outputSchema validation crashes when tools return intermediate human-in-the-loop elicitation requests (resultType: input_required, typescript-sdk #3216). Manages cryptographic requestState nonces and TTL deadlines, and provides deterministic ref sanitization that strips CLI markers (* main, + feature), ANSI escapes, and quotes to prevent downstream tool chaining failures (servers #5641).
 * **Polymorphic Argument & Nullable String Preservation Guard:** Prevents silent argument corruption and premature JSON parsing across MCP tool arguments (python-sdk #3055, servers #5176). Features union-aware schema traversal (anyOf, oneOf, type arrays) that automatically preserves stringified JSON and literal "null" parameters for nullable string annotations, enables safe fallback deserialization for strictly collection schemas, and preserves underlying error causes and stderr diagnostic tails for subprocess failures (servers #5636).
@@ -181,7 +183,7 @@ For production cloud deployments, multi-agent frameworks, and enterprise teams, 
 * **Cloudflare Workers & Docker Compose:** Serverless edge hosting with streaming SSE, plus unprivileged non-root container deployment.
 
 **[Get Pro Pack ($19.00 USD) — Instant Checkout on Whop](https://whop.com/checkout/plan_eiKHeRpooY3yc)**  
-*(Delivery: Instant download of `mcp-pro-pack-v3.6.0.zip` via Whop Files and customer billing portal upon completion).*
+*(Delivery: Instant download of `mcp-pro-pack-v3.7.0.zip` via Whop Files and customer billing portal upon completion).*
 
 ---
 
