@@ -155,6 +155,13 @@ import {
   introspectOAuthToken,
   OAuthTokenLifecycleManager
 } from '../pro_pack/oauth_revocation_guard.ts';
+import {
+  formatSseFrame,
+  createPrimingEventFrame,
+  isPrimingEvent,
+  GaplessEventStore,
+  PrimedStreamManager
+} from '../pro_pack/sse_stream_priming_guard.ts';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -3919,6 +3926,95 @@ async function runProPackTestSuite() {
     const revResult = await manager.logoutAndRevoke('https://idp.example.com', 'active_token_999', {}, mockFetch as any);
     assert.strictEqual(revResult.success, true);
     assert.strictEqual(revResult.status, 200);
+  });
+
+  // ==========================================
+  // Module 30: Standalone SSE Stream Priming, Resumption & Gapless Replay Guard
+  // ==========================================
+  console.log('\n[Module: Standalone SSE Stream Priming, Resumption & Gapless Replay Guard]');
+
+  await test('formatSseFrame formats valid SSE frame with id, event, retry, and multiline data', () => {
+    const frame = formatSseFrame({
+      id: 'evt_101',
+      event: 'mcp_progress',
+      retry: 2500,
+      data: '{\n  "status": "working"\n}'
+    });
+
+    assert.ok(frame.includes('id: evt_101\n'));
+    assert.ok(frame.includes('event: mcp_progress\n'));
+    assert.ok(frame.includes('retry: 2500\n'));
+    assert.ok(frame.includes('data: {\ndata:   "status": "working"\ndata: }\n\n'));
+  });
+
+  await test('createPrimingEventFrame produces spec-compliant priming frame with id and retry', () => {
+    const frame = createPrimingEventFrame('sess_abc', 1, 1000);
+    assert.strictEqual(frame, 'id: sess_abc_1\nretry: 1000\ndata: \n\n');
+  });
+
+  await test('isPrimingEvent identifies empty data priming heartbeats', () => {
+    assert.strictEqual(isPrimingEvent(''), true);
+    assert.strictEqual(isPrimingEvent('   '), true);
+    assert.strictEqual(isPrimingEvent('data:'), true);
+    assert.strictEqual(isPrimingEvent('{"jsonrpc": "2.0"}'), false);
+  });
+
+  await test('GaplessEventStore assigns monotonic sequence IDs and orders events', () => {
+    const store = new GaplessEventStore();
+    const e1 = store.storeEvent('stream_x', 'msg_1');
+    const e2 = store.storeEvent('stream_x', 'msg_2');
+    const e3 = store.storeEvent('stream_x', 'msg_3');
+
+    assert.strictEqual(e1.id, 'stream_x_1');
+    assert.strictEqual(e2.id, 'stream_x_2');
+    assert.strictEqual(e3.id, 'stream_x_3');
+
+    const pending = store.getEventsAfter('stream_x', 'stream_x_1');
+    assert.strictEqual(pending.length, 2);
+    assert.strictEqual(pending[0].message, 'msg_2');
+    assert.strictEqual(pending[1].message, 'msg_3');
+  });
+
+  await test('PrimedStreamManager immediately primes fresh stream to ensure client receives initial event ID (resolves #3211)', () => {
+    const manager = new PrimedStreamManager({ retryIntervalMs: 1500 });
+    const init = manager.initializeStream('sess_fresh', null);
+
+    assert.ok(init.initialFrames.includes('id: sess_fresh_1'));
+    assert.ok(init.initialFrames.includes('retry: 1500'));
+    assert.strictEqual(init.lastEventId, 'sess_fresh_1');
+    assert.strictEqual(init.replayedCount, 0);
+  });
+
+  await test('PrimedStreamManager replays missed events upon reconnection with Last-Event-ID', () => {
+    const manager = new PrimedStreamManager({ retryIntervalMs: 1000 });
+    const streamId = 'sess_rotation';
+
+    // 1. Initial connection primes stream
+    const init = manager.initializeStream(streamId, null);
+    const initialId = init.lastEventId;
+
+    // 2. While client is disconnected during closeStandaloneSSEStream(), events land in store
+    manager.dispatchLiveEvent(streamId, '{"method": "notifications/progress", "params": {"progress": 1}}');
+    manager.dispatchLiveEvent(streamId, '{"method": "notifications/progress", "params": {"progress": 2}}');
+    manager.dispatchLiveEvent(streamId, '{"method": "notifications/message", "params": {"text": "complete"}}');
+
+    // 3. Client reconnects providing Last-Event-ID
+    const resume = manager.initializeStream(streamId, initialId);
+
+    assert.strictEqual(resume.replayedCount, 3);
+    assert.ok(resume.initialFrames.includes('"progress": 1'));
+    assert.ok(resume.initialFrames.includes('"progress": 2'));
+    assert.ok(resume.initialFrames.includes('"text": "complete"'));
+    assert.strictEqual(resume.lastEventId, streamId + '_4');
+  });
+
+  await test('getStandardSseHeaders provides caching and buffering prevention headers', () => {
+    const manager = new PrimedStreamManager();
+    const headers = manager.getStandardSseHeaders();
+
+    assert.strictEqual(headers['Content-Type'], 'text/event-stream');
+    assert.strictEqual(headers['Cache-Control'], 'no-cache, no-transform');
+    assert.strictEqual(headers['X-Accel-Buffering'], 'no');
   });
 
   // Summary
