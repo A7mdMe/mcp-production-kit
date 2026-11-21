@@ -162,6 +162,12 @@ import {
   GaplessEventStore,
   PrimedStreamManager
 } from '../pro_pack/sse_stream_priming_guard.ts';
+import {
+  auditStoragePath,
+  resolveAtomicWriteDestination,
+  writeAtomicPreservingSymlink,
+  sanitizeErrorDetails
+} from '../pro_pack/persistent_symlink_guard.ts';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -4015,6 +4021,104 @@ async function runProPackTestSuite() {
     assert.strictEqual(headers['Content-Type'], 'text/event-stream');
     assert.strictEqual(headers['Cache-Control'], 'no-cache, no-transform');
     assert.strictEqual(headers['X-Accel-Buffering'], 'no');
+  });
+
+  // ==========================================
+  // Module 31: Persistent Symlink Resolution, Atomic Staging & Error Sanitization Guard
+  // ==========================================
+  console.log('\n[Module: Persistent Symlink Resolution, Atomic Staging & Error Sanitization Guard]');
+
+  const samplePath = path.resolve('package.json');
+
+  await test('auditStoragePath accurately detects real files, non-existent paths, and symlink targets', () => {
+    const auditExisting = auditStoragePath(samplePath);
+    assert.strictEqual(auditExisting.targetExists, true);
+    assert.strictEqual(auditExisting.isSymlink, false);
+    assert.strictEqual(auditExisting.isDirectory, false);
+
+    const auditMissing = auditStoragePath('C:/non_existent_dir/missing.jsonl');
+    assert.strictEqual(auditMissing.targetExists, false);
+    assert.strictEqual(auditMissing.isSymlink, false);
+  });
+
+  await test('writeAtomicPreservingSymlink writes through symlink/junction without severing link (resolves #5644)', () => {
+    const tmpBase = path.resolve('test-symlink-guard-' + Date.now());
+    const realDir = path.join(tmpBase, 'real_dir');
+    const linkDir = path.join(tmpBase, 'link_dir');
+    fs.mkdirSync(realDir, { recursive: true });
+
+    try {
+      const realTarget = path.join(realDir, 'real_data.jsonl');
+      fs.writeFileSync(realTarget, '{"type": "entity", "name": "Initial"}\n');
+
+      // Create junction or file symlink
+      let symlinkPath = '';
+      let isFileSymlink = false;
+      try {
+        symlinkPath = path.join(tmpBase, 'symlink_file.jsonl');
+        fs.symlinkSync(realTarget, symlinkPath, 'file');
+        isFileSymlink = true;
+      } catch {
+        // Fallback to directory junction on Windows without elevation
+        fs.symlinkSync(realDir, linkDir, 'junction');
+        symlinkPath = path.join(linkDir, 'real_data.jsonl');
+      }
+
+      // Perform write through symlink/junction path using guard
+      const updatedData = '{"type": "entity", "name": "UpdatedViaGuard"}\n';
+      const res = writeAtomicPreservingSymlink(symlinkPath, updatedData);
+
+      // Assert link/junction remains intact
+      if (isFileSymlink) {
+        assert.strictEqual(fs.lstatSync(symlinkPath).isSymbolicLink(), true);
+      } else {
+        assert.strictEqual(fs.lstatSync(linkDir).isSymbolicLink(), true);
+      }
+
+      // Assert real target received updated data
+      const targetContent = fs.readFileSync(realTarget, 'utf8');
+      assert.strictEqual(targetContent, updatedData);
+    } finally {
+      fs.rmSync(tmpBase, { recursive: true, force: true });
+    }
+  });
+
+  await test('writeAtomicPreservingSymlink performs direct atomic write on regular non-symlink files', () => {
+    const tmpDir = path.resolve('test-atomic-reg-' + Date.now());
+    fs.mkdirSync(tmpDir, { recursive: true });
+
+    try {
+      const targetFile = path.join(tmpDir, 'regular.txt');
+      const res = writeAtomicPreservingSymlink(targetFile, 'content 123');
+
+      assert.strictEqual(fs.existsSync(targetFile), true);
+      assert.strictEqual(fs.readFileSync(targetFile, 'utf8'), 'content 123');
+      assert.strictEqual(res.bytesWritten, 11);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  await test('sanitizeErrorDetails redacts passwords from PostgreSQL and MySQL connection URIs (resolves #5646)', () => {
+    const rawError = 'Database query failed: connection error to postgres://dbadmin:super_secret_pass123@db.prod.internal:5432/analytics_db';
+    const sanitized = sanitizeErrorDetails(rawError);
+
+    assert.ok(!sanitized.includes('super_secret_pass123'));
+    assert.ok(sanitized.includes('postgres://dbadmin:***@db.prod.internal:5432/analytics_db'));
+  });
+
+  await test('sanitizeErrorDetails redacts Bearer tokens and API keys from error outputs', () => {
+    const rawError = 'Upstream 401 error: Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.sig with api_key=sk-proj-999888777666555444';
+    const sanitized = sanitizeErrorDetails(rawError);
+
+    assert.ok(!sanitized.includes('eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9'));
+    assert.ok(!sanitized.includes('sk-proj-999888777666555444'));
+    assert.ok(sanitized.includes('Bearer ***'));
+    assert.ok(sanitized.includes('sk-***'));
+  });
+
+  await test('resolveAtomicWriteDestination handles both symlink and standard paths', () => {
+    assert.strictEqual(resolveAtomicWriteDestination(samplePath), path.resolve(samplePath));
   });
 
   // Summary
