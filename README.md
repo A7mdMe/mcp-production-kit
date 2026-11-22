@@ -10,6 +10,10 @@
 
 ---
 
+
+> 🛡️ **Looking for production security best practices?**  
+> Check out the **[Production MCP Server Hardening & Security Checklist](MCP_PRODUCTION_HARDENING_CHECKLIST.md)** covering 33 architectural vulnerabilities, protocol edge cases, and reliability failure modes discovered in production MCP deployments.
+
 ## Free Core vs. Pro Pack Comparison
 
 | Capability | Free Open-Source Core | Commercial Pro Pack ($19) |
@@ -125,7 +129,24 @@ Add this to your `claude_desktop_config.json`:
 }
 ```
 
-### 4. Run as Remote HTTP/SSE Server
+
+### 4. Connect to Cursor
+Add this to your `.cursor/mcp.json` or Workspace MCP Settings:
+```json
+{
+  "mcpServers": {
+    "production-kit": {
+      "command": "node",
+      "args": [
+        "/path/to/mcp-production-kit/dist/index.js",
+        "--transport=stdio"
+      ]
+    }
+  }
+}
+```
+
+### 5. Run as Remote HTTP/SSE Server
 ```bash
 npm run start:sse
 # Listening on http://localhost:3000
@@ -133,7 +154,7 @@ npm run start:sse
 # SSE Stream: http://localhost:3000/sse
 ```
 
-### 5. Run via Docker
+### 6. Run via Docker
 ```bash
 docker build -t mcp-production-kit .
 docker run -p 3000:3000 -e TRANSPORT=sse mcp-production-kit
