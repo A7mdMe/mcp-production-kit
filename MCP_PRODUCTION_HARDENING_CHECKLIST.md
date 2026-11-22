@@ -107,6 +107,10 @@ Whether you are building MCP servers in TypeScript, Python, or Go for Claude Des
   - *Risk*: `observationCount` metadata calculated at read time can drift after deletions, misleading agents during pagination or overview discovery (`observationLimit: 0`) (servers #5645).
   - *Remedy*: Atomically synchronize `observationCount` across deletions and guarantee that overview queries return exact remaining totals.
 
+- [ ] **20. Unicode NFC vs NFD Normalization Twins & NUL-Byte Sanitization**:
+  - *Risk*: Cross-platform agent fleets (macOS sending decomposed NFD `Cafe\u0301` vs Linux storing precomposed NFC `Caf\u00e9`) generate disjoint duplicate entities for the same conceptual node. Furthermore, embedded NUL bytes (`\0`) cause silent string truncation in downstream C-based database drivers (servers #5643).
+  - *Remedy*: Canonicalize entity names to Unicode NFC, detect and merge normalization twins into primary nodes, and sanitize embedded NUL bytes before database persistence.
+
 - [ ] **19. Knowledge Graph Quarantine & Self-Healing**:
   - *Risk*: A single corrupt, malformed, or un-parseable JSON line in a persistent graph file crashes the entire memory server on startup (servers #5609).
   - *Remedy*: Separate malformed entries into a sidecar quarantine file (`memory.quarantine.jsonl`) while preserving healthy graph records, allowing automated self-healing.
@@ -139,7 +143,7 @@ Whether you are building MCP servers in TypeScript, Python, or Go for Claude Des
 
 ## Need Drop-In, Production-Ready Solutions?
 
-Every single vulnerability, edge case, and architectural invariant listed in this checklist is implemented and verified with **324 automated unit tests** in the **[MCP Production Kit](https://github.com/A7mdMe/mcp-production-kit)**:
+Every single vulnerability, edge case, and architectural invariant listed in this checklist is implemented and verified with **332 automated unit tests** in the **[MCP Production Kit](https://github.com/A7mdMe/mcp-production-kit)**:
 
 - **Free Open-Source Core**: Production-ready TypeScript starter kit with dual stdio/SSE transports, SSRF protection, clean stdio logging, and namespaced memory store.
 - **Commercial Pro Pack**: 33 drop-in modular TypeScript guards covering PostgreSQL/SQLite security, rate limiters, OAuth revocation, atomic symlinks, stream priming, and knowledge graph invariants.
