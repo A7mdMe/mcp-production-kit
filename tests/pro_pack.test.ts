@@ -1,4 +1,11 @@
 import {
+  parseByteSizeSafely,
+  parseDurationSafely,
+  enforceResourceLimit,
+  auditEnvironmentLimits,
+  StreamByteLimitMonitor
+} from '../pro_pack/hardened_env_parser.ts';
+import {
   normalizeUnicode,
   isUnicodeTwin,
   containsNulByte,
@@ -4526,6 +4533,130 @@ async function runProPackTestSuite() {
     const report = auditUnicodeGraph(graph);
     assert.strictEqual(report.zwjSequences.length, 1);
     assert.strictEqual(graph.relations[0].relationType, familyZwj);
+  });
+
+  console.log('\n[Module: Hardened Environment Parser & Resource Limit Guard]');
+
+  await test('parseByteSizeSafely handles standard numeric inputs and clamps to bounds', () => {
+    const defaultVal = 10 * 1024 * 1024;
+    const parsed = parseByteSizeSafely(2048, { defaultValue: defaultVal, minBytes: 1024, maxBytes: 4096 });
+    assert.strictEqual(parsed, 2048);
+
+    const clampedMin = parseByteSizeSafely(500, { defaultValue: defaultVal, minBytes: 1024, maxBytes: 4096 });
+    assert.strictEqual(clampedMin, 1024);
+
+    const clampedMax = parseByteSizeSafely(10000, { defaultValue: defaultVal, minBytes: 1024, maxBytes: 4096 });
+    assert.strictEqual(clampedMax, 4096);
+  });
+
+  await test('parseByteSizeSafely parses unit suffixes (KB, MB, GB) and prevents NaN on non-numeric strings (resolves servers #5642)', () => {
+    const defaultVal = 5 * 1024 * 1024;
+
+    // Unit suffixes
+    assert.strictEqual(parseByteSizeSafely('10KB', { defaultValue: defaultVal }), 10 * 1024);
+    assert.strictEqual(parseByteSizeSafely('2.5MB', { defaultValue: defaultVal }), Math.floor(2.5 * 1024 * 1024));
+    assert.strictEqual(parseByteSizeSafely('1GB', { defaultValue: defaultVal }), 1024 * 1024 * 1024);
+
+    // Non-numeric strings that naive Number() turns into NaN
+    assert.strictEqual(parseByteSizeSafely('not-a-number', { defaultValue: defaultVal }), defaultVal);
+    assert.strictEqual(parseByteSizeSafely('${MAX_SIZE}', { defaultValue: defaultVal }), defaultVal);
+    assert.strictEqual(parseByteSizeSafely('', { defaultValue: defaultVal }), defaultVal);
+    assert.strictEqual(parseByteSizeSafely(undefined, { defaultValue: defaultVal }), defaultVal);
+  });
+
+  await test('parseDurationSafely parses time unit suffixes (ms, s, m, h) and falls back safely on invalid strings', () => {
+    const defaultMs = 30000;
+
+    assert.strictEqual(parseDurationSafely('500ms', { defaultValueMs: defaultMs }), 500);
+    assert.strictEqual(parseDurationSafely('15s', { defaultValueMs: defaultMs }), 15000);
+    assert.strictEqual(parseDurationSafely('2m', { defaultValueMs: defaultMs }), 120000);
+    assert.strictEqual(parseDurationSafely('1h', { defaultValueMs: defaultMs }), 3600000);
+
+    // Corrupted input
+    assert.strictEqual(parseDurationSafely('infinite', { defaultValueMs: defaultMs }), defaultMs);
+    assert.strictEqual(parseDurationSafely(-100, { defaultValueMs: defaultMs }), defaultMs);
+  });
+
+  await test('enforceResourceLimit enforces fail-closed semantics when limit string evaluates to NaN (resolves servers #5642)', () => {
+    const defaultLimit = 10 * 1024; // 10KB fallback
+
+    // Naive Number("unlimited") -> NaN. In naive code: 50000 > NaN is FALSE (bypass!).
+    // In our hardened guard, invalid input resolves to defaultLimit (10KB), so 50000 is BLOCKED.
+    const result = enforceResourceLimit(50000, 'unlimited', {
+      defaultValue: defaultLimit,
+      limitName: 'GZIP_MAX_FETCH_SIZE'
+    });
+
+    assert.strictEqual(result.allowed, false);
+    assert.strictEqual(result.limit, defaultLimit);
+    assert.strictEqual(result.actual, 50000);
+    assert.ok(result.error && result.error.includes('Resource limit exceeded'));
+  });
+
+  await test('enforceResourceLimit permits valid payloads and blocks payloads exceeding byte limit', () => {
+    const defaultLimit = 1024 * 1024;
+
+    const underLimit = enforceResourceLimit(500, '1000', { defaultValue: defaultLimit });
+    assert.strictEqual(underLimit.allowed, true);
+
+    const overLimit = enforceResourceLimit(1500, '1000', { defaultValue: defaultLimit });
+    assert.strictEqual(overLimit.allowed, false);
+  });
+
+  await test('auditEnvironmentLimits detects variables that produce NaN under naive Number() parsing', () => {
+    const testEnv = {
+      'GZIP_MAX_FETCH_SIZE': '10MB', // Naive Number('10MB') is NaN!
+      'GZIP_MAX_FETCH_TIME_MILLIS': 'invalid_timeout', // Naive Number() is NaN!
+      'VALID_INT': '500'
+    };
+
+    const rules = [
+      { key: 'GZIP_MAX_FETCH_SIZE', type: 'bytes' as const, defaultValue: 5 * 1024 * 1024 },
+      { key: 'GZIP_MAX_FETCH_TIME_MILLIS', type: 'duration' as const, defaultValue: 30000 },
+      { key: 'VALID_INT', type: 'integer' as const, defaultValue: 100 }
+    ];
+
+    const audit = auditEnvironmentLimits(testEnv, rules);
+    assert.strictEqual(audit.isClean, false);
+    assert.strictEqual(audit.warnings.length, 2);
+    assert.ok(audit.warnings[0].includes('evaluates to NaN under naive Number()'));
+    assert.strictEqual(audit.parsedLimits['GZIP_MAX_FETCH_SIZE'], 10 * 1024 * 1024);
+    assert.strictEqual(audit.parsedLimits['GZIP_MAX_FETCH_TIME_MILLIS'], 30000);
+    assert.strictEqual(audit.parsedLimits['VALID_INT'], 500);
+  });
+
+  await test('StreamByteLimitMonitor tracks chunk accumulation and halts stream when exceeding cap', () => {
+    const monitor = new StreamByteLimitMonitor(1000);
+
+    const chunk1 = monitor.trackChunk(400);
+    assert.strictEqual(chunk1.allowed, true);
+    assert.strictEqual(monitor.getBytes(), 400);
+
+    const chunk2 = monitor.trackChunk(500);
+    assert.strictEqual(chunk2.allowed, true);
+    assert.strictEqual(monitor.getBytes(), 900);
+
+    const chunk3 = monitor.trackChunk(200);
+    assert.strictEqual(chunk3.allowed, false);
+    assert.strictEqual(monitor.getBytes(), 1100);
+  });
+
+  await test('auditEnvironmentLimits parses valid environment limits into sanitized numeric record', () => {
+    const testEnv = {
+      'MAX_PAYLOAD': '50000',
+      'TIMEOUT_MS': '10000'
+    };
+
+    const rules = [
+      { key: 'MAX_PAYLOAD', type: 'bytes' as const, defaultValue: 10000 },
+      { key: 'TIMEOUT_MS', type: 'duration' as const, defaultValue: 5000 }
+    ];
+
+    const audit = auditEnvironmentLimits(testEnv, rules);
+    assert.strictEqual(audit.isClean, true);
+    assert.strictEqual(audit.warnings.length, 0);
+    assert.strictEqual(audit.parsedLimits['MAX_PAYLOAD'], 50000);
+    assert.strictEqual(audit.parsedLimits['TIMEOUT_MS'], 10000);
   });
 
   // Summary
