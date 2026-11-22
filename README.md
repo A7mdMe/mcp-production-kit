@@ -33,6 +33,7 @@
 | **Stdio Lifecycle & Epoch Fence** | - | **Monotonic epoch fence, eliminates Connection closed races & reaps orphans** |
 | **Client Session Invariants** | - | **Fail-closed discovery on closed client, prevents hallucinated empty tools** |
 | **Subscription Router Guard** | - | **Zero-slot graceful completion for unadvertised filters, prevents DoS** |
+| **RFC 6570 URI Template Guard** | - | **Tolerates empty expressions without crashes (#3221); RFC 6570 §3.2.1 encoding (#3219)** |
 | **Persistent Symlink Guard** | - | **Preserves PV symlinks during atomic renames (#5644); redacts DB credentials (#5646)** |
 | **SSE Stream Priming Guard** | - | **Immediate t=0 event ID priming & gapless Last-Event-ID replay for GET streams (#3211)** |
 | **OAuth Token Revocation Guard** | - | **RFC 7009 revocation, RFC 7662 introspection & OIDC metadata preservation (#3213)** |
@@ -151,8 +152,9 @@ docker run -p 3000:3000 -e TRANSPORT=sse mcp-production-kit
 
 ## Commercial Pro Pack ($19 One-Time)
 
-For production cloud deployments, multi-agent frameworks, and enterprise teams, the **Pro Pack** provides drop-in, battle-tested extensions with 295 dedicated automated unit tests (309 total across the project):
+For production cloud deployments, multi-agent frameworks, and enterprise teams, the **Pro Pack** provides drop-in, battle-tested extensions with 302 dedicated automated unit tests (316 total across the project):
 
+* **RFC 6570 URI Template Normalizer & Resource Routing Guard:** Eliminates unhandled TypeError crashes on empty expressions during MCP resource routing and template resolution (typescript-sdk #3221). Implements strict RFC 6570 §3.2.1 percent-encoding for non-reserved operators, coalesces adjacent literal slices, and provides safe, structured pattern matching without crashing server sessions or leaking JSON-RPC -32603 internal errors (typescript-sdk #3219).
 * **Persistent Symlink Resolution, Atomic Staging & Error Sanitization Guard:** Eliminates broken symlinks and silent persistent volume desync incidents during atomic renames (servers #5644). Automatically resolves physical target paths to write through symlinks without unlinking them, handles EXDEV cross-device container volume errors, and performs deep error credential sanitization to prevent leaking database passwords or Bearer tokens in failure outputs (servers #5646).
 * **Standalone SSE Stream Priming, Resumption & Gapless Replay Guard:** Eliminates silent notification loss on standalone GET SSE streams during proxy timeouts and connection rotations (typescript-sdk #3211). Automatically writes an initial spec-compliant priming frame (id: <streamId>_1, retry: <interval>) at t=0 so clients always retain a resumption ID, filters priming frames from application data, and performs gapless event replay upon reconnection with Last-Event-ID.
 * **OIDC / OAuth Token Revocation, Introspection & Discovery Metadata Guard:** Eliminates zombie token persistence and authorization leaks by preserving RFC 7009 revocation_endpoint and RFC 7662 introspection_endpoint during OpenID Connect discovery (typescript-sdk #3213). Includes automated token lifecycle management with client_secret_basic and client_secret_post support to ensure tokens are actively revoked on IdPs (Cognito, Okta, Keycloak) when clients log out.
@@ -185,7 +187,7 @@ For production cloud deployments, multi-agent frameworks, and enterprise teams, 
 * **Cloudflare Workers & Docker Compose:** Serverless edge hosting with streaming SSE, plus unprivileged non-root container deployment.
 
 **[Get Pro Pack ($19.00 USD) — Instant Checkout on Whop](https://whop.com/checkout/plan_eiKHeRpooY3yc)**  
-*(Delivery: Instant download of `mcp-pro-pack-v3.8.0.zip` via Whop Files and customer billing portal upon completion).*
+*(Delivery: Instant download of `mcp-pro-pack-v3.9.0.zip` via Whop Files and customer billing portal upon completion).*
 
 ---
 
