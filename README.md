@@ -37,6 +37,7 @@
 | **Stdio Lifecycle & Epoch Fence** | - | **Monotonic epoch fence, eliminates Connection closed races & reaps orphans** |
 | **Client Session Invariants** | - | **Fail-closed discovery on closed client, prevents hallucinated empty tools** |
 | **Subscription Router Guard** | - | **Zero-slot graceful completion for unadvertised filters, prevents DoS** |
+| **Unicode Normalization & Identity** | - | **NFC/NFD twin reconciliation, NUL-byte sanitization & ZWJ preservation (#5643)** |
 | **Memory Invariant & Graph Guard** | - | **Exact/trimmed relation deletes, case collision auto-heal, count sync (#5645)** |
 | **RFC 6570 URI Template Guard** | - | **Tolerates empty expressions without crashes (#3221); RFC 6570 §3.2.1 encoding (#3219)** |
 | **Persistent Symlink Guard** | - | **Preserves PV symlinks during atomic renames (#5644); redacts DB credentials (#5646)** |
@@ -174,8 +175,9 @@ docker run -p 3000:3000 -e TRANSPORT=sse mcp-production-kit
 
 ## Commercial Pro Pack ($19 One-Time)
 
-For production cloud deployments, multi-agent frameworks, and enterprise teams, the **Pro Pack** provides drop-in, battle-tested extensions with 310 dedicated automated unit tests (324 total across the project):
+For production cloud deployments, multi-agent frameworks, and enterprise teams, the **Pro Pack** provides drop-in, battle-tested extensions with 318 dedicated automated unit tests (332 total across the project):
 
+* **Unicode Normalization, NUL-Byte Sanitization & Byte-Identity Guard:** Eliminates cross-platform memory corruption, Unicode normalization twins (NFC vs NFD), and NUL-byte truncation in MCP memory servers (servers #5643). Automatically canonicalizes entity names across macOS and Linux/Windows environments, merges split-brain normalization variants, and preserves multi-codepoint Zero-Width Joiner (ZWJ) emoji sequences byte-for-byte.
 * **Knowledge Graph Memory Invariant, Case Normalizer & Exact-Match Sanitization Guard:** Resolves memory graph corruption and zombie relations in MCP memory servers (servers #5645). Provides configurable exact-match vs whitespace-trimmed relation deletions, audits and auto-heals case collisions across entity names, and ensures observationCount metadata is atomically synchronized across overview queries.
 * **RFC 6570 URI Template Normalizer & Resource Routing Guard:** Eliminates unhandled TypeError crashes on empty expressions during MCP resource routing and template resolution (typescript-sdk #3221). Implements strict RFC 6570 §3.2.1 percent-encoding for non-reserved operators, coalesces adjacent literal slices, and provides safe, structured pattern matching without crashing server sessions or leaking JSON-RPC -32603 internal errors (typescript-sdk #3219).
 * **Persistent Symlink Resolution, Atomic Staging & Error Sanitization Guard:** Eliminates broken symlinks and silent persistent volume desync incidents during atomic renames (servers #5644). Automatically resolves physical target paths to write through symlinks without unlinking them, handles EXDEV cross-device container volume errors, and performs deep error credential sanitization to prevent leaking database passwords or Bearer tokens in failure outputs (servers #5646).
@@ -210,7 +212,7 @@ For production cloud deployments, multi-agent frameworks, and enterprise teams, 
 * **Cloudflare Workers & Docker Compose:** Serverless edge hosting with streaming SSE, plus unprivileged non-root container deployment.
 
 **[Get Pro Pack ($19.00 USD) — Instant Checkout on Whop](https://whop.com/checkout/plan_eiKHeRpooY3yc)**  
-*(Delivery: Instant download of `mcp-pro-pack-v3.10.0.zip` via Whop Files and customer billing portal upon completion).*
+*(Delivery: Instant download of `mcp-pro-pack-v3.11.0.zip` via Whop Files and customer billing portal upon completion).*
 
 ---
 
