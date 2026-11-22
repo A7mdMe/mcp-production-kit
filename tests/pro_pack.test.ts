@@ -1,3 +1,12 @@
+import {
+  HardenedKnowledgeGraphManager,
+  deleteRelationsSafely,
+  deleteObservationsSafely,
+  formatOverviewGraph,
+  searchNodesSafely,
+  auditKnowledgeGraph,
+  autoHealKnowledgeGraph
+} from '../pro_pack/memory_invariant_guard.ts';
 import assert from 'assert';
 import { validateReadOnlyQuery } from '../pro_pack/postgres_connector.ts';
 import { handleJsonRpc } from '../pro_pack/cloudflare_worker.ts';
@@ -4200,6 +4209,172 @@ async function runProPackTestSuite() {
 
     const resQuery = expandUriTemplate('{?x,y}', { x: 1, y: 2 });
     assert.strictEqual(resQuery, '?x=1&y=2');
+  });
+
+  console.log('\n[Module: Knowledge Graph Memory Invariant, Case Normalizer & Exact-Match Sanitization Guard]');
+
+  await test('deleteRelations exact-match invariant: space-padded type deletes nothing (resolves servers #5645)', async () => {
+    const manager = new HardenedKnowledgeGraphManager();
+    await manager.createEntities([
+      { name: 'A', entityType: 't', observations: [] },
+      { name: 'B', entityType: 't', observations: [] }
+    ]);
+    await manager.createRelations([
+      { from: 'A', to: 'B', relationType: 'knows' }
+    ]);
+
+    for (const padded of ['knows ', ' knows']) {
+      const result = await manager.deleteRelations([
+        { from: 'A', to: 'B', relationType: padded }
+      ], { matchMode: 'exact' });
+      assert.strictEqual(result.deletedCount, 0);
+    }
+
+    const currentGraph = await manager.readGraph();
+    assert.strictEqual(currentGraph.relations.length, 1);
+
+    const exact = await manager.deleteRelations([
+      { from: 'A', to: 'B', relationType: 'knows' }
+    ], { matchMode: 'exact' });
+    assert.strictEqual(exact.deletedCount, 1);
+
+    const postDeleteGraph = await manager.readGraph();
+    assert.strictEqual(postDeleteGraph.relations.length, 0);
+  });
+
+  await test('deleteRelations in trimmed mode cleans up space-padded relation types', () => {
+    const graph = {
+      entities: [
+        { name: 'X', entityType: 't', observations: [] },
+        { name: 'Y', entityType: 't', observations: [] }
+      ],
+      relations: [
+        { from: 'X', to: 'Y', relationType: 'worksWith ' }
+      ]
+    };
+
+    const res = deleteRelationsSafely(graph, [
+      { from: 'X', to: 'Y', relationType: 'worksWith' }
+    ], { matchMode: 'trimmed' });
+
+    assert.strictEqual(res.deletedCount, 1);
+    assert.strictEqual(graph.relations.length, 0);
+  });
+
+  await test('keeps Test and test distinct on write face, while search finds both (resolves servers #5645)', async () => {
+    const manager = new HardenedKnowledgeGraphManager();
+    await manager.createEntities([
+      { name: 'Test', entityType: 'T', observations: [] },
+      { name: 'test', entityType: 'T', observations: [] }
+    ]);
+
+    const graph = await manager.readGraph();
+    assert.deepStrictEqual(graph.entities.map(e => e.name), ['Test', 'test']);
+
+    const foundLower = await manager.searchNodes('test');
+    assert.deepStrictEqual(foundLower.entities.map(e => e.name), ['Test', 'test']);
+
+    const foundUpper = await manager.searchNodes('TEST');
+    assert.deepStrictEqual(foundUpper.entities.map(e => e.name), ['Test', 'test']);
+  });
+
+  await test('observationCount agrees with deleteObservations on overview read (resolves servers #5645)', async () => {
+    const manager = new HardenedKnowledgeGraphManager();
+    await manager.createEntities([
+      { name: 'E', entityType: 't', observations: ['O1', 'O2', 'O3'] }
+    ]);
+
+    await manager.deleteObservations([
+      { entityName: 'E', observations: ['O1'] }
+    ]);
+
+    const overview = await manager.readGraph({ observationLimit: 0 });
+    assert.strictEqual(overview.entities[0].observationCount, 2);
+    assert.deepStrictEqual(overview.entities[0].observations, []);
+
+    const full = await manager.readGraph();
+    assert.deepStrictEqual(full.entities[0].observations, ['O2', 'O3']);
+  });
+
+  await test('auditKnowledgeGraph detects whitespace padding, case collisions, and stale counts', () => {
+    const graph = {
+      entities: [
+        { name: ' Agent ', entityType: 'bot', observations: ['active'], observationCount: 99 },
+        { name: 'agent', entityType: 'bot', observations: ['idle'], observationCount: 1 }
+      ],
+      relations: [
+        { from: 'Agent', to: 'GhostTarget', relationType: 'manages ' }
+      ]
+    };
+
+    const report = auditKnowledgeGraph(graph);
+    assert.strictEqual(report.isClean, false);
+    assert.strictEqual(report.whitespacePaddedEntities.length, 1);
+    assert.strictEqual(report.whitespacePaddedRelations.length, 1);
+    assert.strictEqual(report.caseCollisions.length, 1);
+    assert.strictEqual(report.staleObservationCounts.length, 1);
+    assert.strictEqual(report.orphanedRelations.length, 1);
+  });
+
+  await test('autoHealKnowledgeGraph repairs whitespace, syncs counts and prunes orphans', () => {
+    const graph = {
+      entities: [
+        { name: ' Agent ', entityType: 'bot', observations: ['active'], observationCount: 99 },
+        { name: 'DB', entityType: 'db', observations: [] }
+      ],
+      relations: [
+        { from: ' Agent ', to: 'DB', relationType: 'connectsTo ' },
+        { from: 'Agent', to: 'NonExistent', relationType: 'calls' }
+      ]
+    };
+
+    const res = autoHealKnowledgeGraph(graph, {
+      trimWhitespace: true,
+      fixObservationCounts: true,
+      pruneOrphanedRelations: true
+    });
+
+    assert.strictEqual(res.healed, true);
+    assert.strictEqual(graph.entities[0].name, 'Agent');
+    assert.strictEqual(graph.entities[0].observationCount, 1);
+    assert.strictEqual(graph.relations.length, 1);
+    assert.strictEqual(graph.relations[0].relationType, 'connectsTo');
+  });
+
+  await test('autoHealKnowledgeGraph merges case-variant entities into canonical node', () => {
+    const graph = {
+      entities: [
+        { name: 'User', entityType: 'person', observations: ['role:admin'] },
+        { name: 'user', entityType: 'person', observations: ['logged_in'] }
+      ],
+      relations: [
+        { from: 'user', to: 'App', relationType: 'accesses' }
+      ]
+    };
+
+    const res = autoHealKnowledgeGraph(graph, { mergeCaseCollisions: true });
+    assert.strictEqual(res.healed, true);
+    assert.strictEqual(graph.entities.length, 1);
+    assert.strictEqual(graph.entities[0].name, 'User');
+    assert.strictEqual(graph.entities[0].observations.length, 2);
+    assert.strictEqual(graph.relations[0].from, 'User');
+  });
+
+  await test('HardenedKnowledgeGraphManager provides end-to-end lifecycle with audit & autoheal', async () => {
+    const manager = new HardenedKnowledgeGraphManager();
+    await manager.createEntities([
+      { name: 'Service', entityType: 'backend', observations: ['v1'] }
+    ]);
+    await manager.createRelations([
+      { from: 'Service', to: 'Redis', relationType: 'caches' }
+    ]);
+
+    const report = await manager.audit();
+    assert.strictEqual(report.orphanedRelations.length, 1); // Redis entity not yet created
+
+    await manager.autoHeal({ pruneOrphanedRelations: true });
+    const postHeal = await manager.readGraph();
+    assert.strictEqual(postHeal.relations.length, 0);
   });
 
   // Summary
