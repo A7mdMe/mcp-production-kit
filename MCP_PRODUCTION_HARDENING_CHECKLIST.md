@@ -61,6 +61,10 @@ Whether you are building MCP servers in TypeScript, Python, or Go for Claude Des
 
 ---
 
+- [ ] **10. Fail-Closed Environment Variable & Resource Limit Parsing**:
+  - *Risk*: Naive `Number(process.env.VAR)` evaluates to `NaN` when operators configure limits with unit suffixes (`10MB`, `500KB`, `30s`) or non-numeric strings. Because relational comparisons against `NaN` (`size > NaN`) always evaluate to `false`, **THE RESOURCE LIMIT IS SILENTLY DISABLED**, allowing unbounded payload fetches that trigger OOM crashes (servers #5642).
+  - *Remedy*: Parse byte sizes and durations safely with unit multiplier support (`KB`, `MB`, `GB`, `ms`, `s`, `m`), clamp values within safe minimum/maximum bounds, and strictly fail-closed back to secure defaults if parsing fails.
+
 ## 3. Filesystem & Volume Persistence
 
 - [ ] **10. Strict Path Containment & Device Traversal Guards**:
@@ -143,7 +147,7 @@ Whether you are building MCP servers in TypeScript, Python, or Go for Claude Des
 
 ## Need Drop-In, Production-Ready Solutions?
 
-Every single vulnerability, edge case, and architectural invariant listed in this checklist is implemented and verified with **332 automated unit tests** in the **[MCP Production Kit](https://github.com/A7mdMe/mcp-production-kit)**:
+Every single vulnerability, edge case, and architectural invariant listed in this checklist is implemented and verified with **334 automated unit tests** in the **[MCP Production Kit](https://github.com/A7mdMe/mcp-production-kit)**:
 
 - **Free Open-Source Core**: Production-ready TypeScript starter kit with dual stdio/SSE transports, SSRF protection, clean stdio logging, and namespaced memory store.
 - **Commercial Pro Pack**: 33 drop-in modular TypeScript guards covering PostgreSQL/SQLite security, rate limiters, OAuth revocation, atomic symlinks, stream priming, and knowledge graph invariants.
