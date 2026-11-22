@@ -168,6 +168,13 @@ import {
   writeAtomicPreservingSymlink,
   sanitizeErrorDetails
 } from '../pro_pack/persistent_symlink_guard.ts';
+import {
+  encodeUriComponentRfc6570,
+  encodeReservedRfc6570,
+  parseUriTemplateSafely,
+  expandUriTemplate,
+  matchUriTemplateSafely
+} from '../pro_pack/uri_template_guard.ts';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -4119,6 +4126,80 @@ async function runProPackTestSuite() {
 
   await test('resolveAtomicWriteDestination handles both symlink and standard paths', () => {
     assert.strictEqual(resolveAtomicWriteDestination(samplePath), path.resolve(samplePath));
+  });
+
+  // ==========================================
+  // Module 32: RFC 6570 URI Template Normalizer & Resource Routing Guard
+  // ==========================================
+  console.log('\n[Module: RFC 6570 URI Template Normalizer & Resource Routing Guard]');
+
+  await test('encodeUriComponentRfc6570 accurately percent-encodes RFC 6570 non-reserved characters (resolves #3219)', () => {
+    assert.strictEqual(encodeUriComponentRfc6570('Hello World!'), 'Hello%20World%21');
+    assert.strictEqual(encodeUriComponentRfc6570("a!b'c(d)e*f"), 'a%21b%27c%28d%29e%2Af');
+  });
+
+  await test('expandUriTemplate applies RFC 6570 encoding across non-reserved query and path expressions', () => {
+    const resQuery = expandUriTemplate('{?q}', { q: 'a(b)' });
+    assert.strictEqual(resQuery, '?q=a%28b%29');
+
+    const resPath = expandUriTemplate('{/path}', { path: 'dir*name' });
+    assert.strictEqual(resPath, '/dir%2Aname');
+  });
+
+  await test('expandUriTemplate preserves sub-delims for reserved expansion (+ and #)', () => {
+    const resReserved = expandUriTemplate('{+path}', { path: 'sub/dir!name' });
+    assert.strictEqual(resReserved, 'sub/dir!name');
+  });
+
+  await test('matchUriTemplateSafely handles empty expressions without throwing TypeError (resolves #3221)', () => {
+    // Empty expression {}
+    const r1 = matchUriTemplateSafely('{}', 'abc');
+    assert.strictEqual(r1.matched, false);
+    assert.strictEqual(r1.error, undefined);
+
+    // Literal with empty expression /api/{}
+    const r2 = matchUriTemplateSafely('/api/{}', '/api/x');
+    assert.strictEqual(r2.matched, false);
+    assert.strictEqual(r2.error, undefined);
+
+    // Malformed expressions {,} and {*}
+    const r3 = matchUriTemplateSafely('{,}', 'test');
+    assert.strictEqual(r3.matched, false);
+    const r4 = matchUriTemplateSafely('{*}', 'test');
+    assert.strictEqual(r4.matched, false);
+  });
+
+  await test('matchUriTemplateSafely accurately matches valid templates and extracts parameters', () => {
+    const res = matchUriTemplateSafely('/users/{id}/repos/{repo}', '/users/alice/repos/my-mcp');
+    assert.strictEqual(res.matched, true);
+    assert.strictEqual(res.params.id, 'alice');
+    assert.strictEqual(res.params.repo, 'my-mcp');
+
+    const resQuery = matchUriTemplateSafely('{?search}', '?search=mcp%20tool');
+    assert.strictEqual(resQuery.matched, true);
+    assert.strictEqual(resQuery.params.search, 'mcp tool');
+  });
+
+  await test('parseUriTemplateSafely prunes empty expressions and parses variables correctly', () => {
+    const parts = parseUriTemplateSafely('/data/{id}/{}/notes');
+    assert.strictEqual(parts.length, 3);
+    assert.strictEqual(parts[0].type, 'literal');
+    assert.strictEqual(parts[0].value, '/data/');
+    assert.strictEqual(parts[1].type, 'expression');
+    assert.strictEqual(parts[1].variables[0].name, 'id');
+    assert.strictEqual(parts[2].type, 'literal');
+    assert.strictEqual(parts[2].value, '//notes');
+  });
+
+  await test('expandUriTemplate handles multi-variable expressions with proper operator separators', () => {
+    const resDot = expandUriTemplate('{.a,b}', { a: 'alpha', b: 'beta' });
+    assert.strictEqual(resDot, '.alpha.beta');
+
+    const resSlash = expandUriTemplate('{/dir,sub}', { dir: 'root', sub: 'child' });
+    assert.strictEqual(resSlash, '/root/child');
+
+    const resQuery = expandUriTemplate('{?x,y}', { x: 1, y: 2 });
+    assert.strictEqual(resQuery, '?x=1&y=2');
   });
 
   // Summary
