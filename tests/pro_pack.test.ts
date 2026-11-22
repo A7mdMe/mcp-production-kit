@@ -1,4 +1,14 @@
 import {
+  normalizeUnicode,
+  isUnicodeTwin,
+  containsNulByte,
+  sanitizeNulBytes,
+  containsZwjSequence,
+  auditUnicodeGraph,
+  canonicalizeUnicodeGraph,
+  searchUnicodeNodes
+} from '../pro_pack/unicode_byte_identity_guard.ts';
+import {
   HardenedKnowledgeGraphManager,
   deleteRelationsSafely,
   deleteObservationsSafely,
@@ -4375,6 +4385,147 @@ async function runProPackTestSuite() {
     await manager.autoHeal({ pruneOrphanedRelations: true });
     const postHeal = await manager.readGraph();
     assert.strictEqual(postHeal.relations.length, 0);
+  });
+
+  console.log('\n[Module: Unicode Normalization, NUL-Byte Sanitization & Byte-Identity Guard]');
+
+  await test('round-trips an entity name containing a NUL byte, exactly (resolves servers #5643)', () => {
+    const nulName = 'Entity\0Null';
+    const graph = {
+      entities: [
+        { name: nulName, entityType: 'Type\0Null', observations: ['obs\0x'], observationCount: 1 }
+      ],
+      relations: []
+    };
+
+    assert.strictEqual(containsNulByte(nulName), true);
+    assert.strictEqual(graph.entities[0].name, 'Entity\0Null');
+
+    const sanitized = sanitizeNulBytes(nulName, '_');
+    assert.strictEqual(sanitized, 'Entity_Null');
+  });
+
+  await test('accepts an empty-string entity name and treats a repeat as a duplicate (resolves servers #5643)', () => {
+    const graph = { entities: [], relations: [] };
+
+    // First create
+    graph.entities.push({ name: '', entityType: 'Void', observations: [] });
+    assert.strictEqual(graph.entities.length, 1);
+    assert.strictEqual(graph.entities[0].name, '');
+
+    // Duplicate check
+    const existing = graph.entities.find(e => e.name === '');
+    assert.notStrictEqual(existing, undefined);
+  });
+
+  await test('filters by an empty-string entity type, exactly (resolves servers #5643)', () => {
+    const graph = {
+      entities: [
+        { name: 'NoType', entityType: '', observations: [] },
+        { name: 'Typed', entityType: 'thing', observations: [] }
+      ],
+      relations: []
+    };
+
+    const emptyTypeEntities = graph.entities.filter(e => e.entityType === '');
+    assert.strictEqual(emptyTypeEntities.length, 1);
+    assert.strictEqual(emptyTypeEntities[0].name, 'NoType');
+
+    const typedEntities = graph.entities.filter(e => e.entityType === 'thing');
+    assert.strictEqual(typedEntities.length, 1);
+    assert.strictEqual(typedEntities[0].name, 'Typed');
+  });
+
+  await test('detects and differentiates NFC vs NFD spellings of same word (resolves servers #5643)', () => {
+    const nfc = 'Caf\u00e9'; // é as single code point
+    const nfd = 'Cafe\u0301'; // e + combining acute
+    assert.notStrictEqual(nfc, nfd);
+    assert.strictEqual(isUnicodeTwin(nfc, nfd), true);
+
+    const graph = {
+      entities: [
+        { name: nfc, entityType: 'place', observations: ['nfc_obs'] },
+        { name: nfd, entityType: 'place', observations: ['nfd_obs'] }
+      ],
+      relations: []
+    };
+
+    const report = auditUnicodeGraph(graph);
+    assert.strictEqual(report.unicodeTwins.length, 1);
+    assert.strictEqual(report.unicodeTwins[0].nfc, nfc);
+    assert.deepStrictEqual(report.unicodeTwins[0].entities, [nfc, nfd]);
+  });
+
+  await test('canonicalizeUnicodeGraph merges NFC/NFD twins into unified canonical entity', () => {
+    const nfc = 'Caf\u00e9';
+    const nfd = 'Cafe\u0301';
+    const graph = {
+      entities: [
+        { name: nfc, entityType: 'place', observations: ['best espresso'] },
+        { name: nfd, entityType: 'place', observations: ['free wifi'] }
+      ],
+      relations: [
+        { from: nfd, to: 'Downtown', relationType: 'locatedIn' }
+      ]
+    };
+
+    const res = canonicalizeUnicodeGraph(graph);
+    assert.strictEqual(res.mergedTwinsCount, 1);
+    assert.strictEqual(graph.entities.length, 1);
+    assert.strictEqual(graph.entities[0].name, nfc);
+    assert.strictEqual(graph.entities[0].observations.length, 2);
+    assert.strictEqual(graph.relations[0].from, nfc);
+  });
+
+  await test('searchUnicodeNodes matches normalization twins across NFC and NFD queries', () => {
+    const nfc = 'Caf\u00e9';
+    const nfd = 'Cafe\u0301';
+    const graph = {
+      entities: [
+        { name: nfc, entityType: 'cafe', observations: ['warm atmosphere'] }
+      ],
+      relations: []
+    };
+
+    // Query in NFD finds the NFC entity when normalized
+    const foundByNfd = searchUnicodeNodes(graph, nfd, { normalizeQuery: true });
+    assert.strictEqual(foundByNfd.entities.length, 1);
+    assert.strictEqual(foundByNfd.entities[0].name, nfc);
+  });
+
+  await test('treats a path-shaped name as an opaque string (resolves servers #5643)', () => {
+    const pathName = '/users/admin';
+    const graph = {
+      entities: [
+        { name: pathName, entityType: 'person', observations: [] },
+        { name: '/users/guest', entityType: 'person', observations: [] }
+      ],
+      relations: [
+        { from: pathName, to: '/users/guest', relationType: 'knows' }
+      ]
+    };
+
+    assert.strictEqual(graph.entities[0].name, '/users/admin');
+    assert.strictEqual(graph.relations[0].from, '/users/admin');
+  });
+
+  await test('stores and audits a ZWJ emoji relation type verbatim (resolves servers #5643)', () => {
+    const familyZwj = '\u{1F468}\u200D\u{1F466}'; // man + ZWJ + boy
+    assert.strictEqual(containsZwjSequence(familyZwj), true);
+
+    const graph = {
+      entities: [
+        { name: 'Father', entityType: 'person', observations: [] },
+        { name: 'Son', entityType: 'person', observations: [] }
+      ],
+      relations: [
+        { from: 'Father', to: 'Son', relationType: familyZwj }
+      ]
+    };
+
+    const report = auditUnicodeGraph(graph);
+    assert.strictEqual(report.zwjSequences.length, 1);
+    assert.strictEqual(graph.relations[0].relationType, familyZwj);
   });
 
   // Summary
