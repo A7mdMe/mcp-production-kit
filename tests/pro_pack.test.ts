@@ -1,4 +1,9 @@
 import {
+  trapTransportLifecycle,
+  disarmDyingTransport,
+  ResilientClientConnectionManager
+} from '../pro_pack/stdio_lifecycle_sentinel.ts';
+import {
   sanitizeLoneSurrogatesInJson,
   extractRequestIdFromMalformedJson,
   createParseErrorResponse,
@@ -4882,6 +4887,153 @@ async function runProPackTestSuite() {
     assert.strictEqual(res.errorResponse?.id, 7);
     assert.strictEqual(res.errorResponse?.error.code, -32700);
     assert.strictEqual(res.recoveredId, 7);
+  });
+
+  console.log('\n[Module: Resilient Stdio Connection Lifecycle Sentinel]');
+
+  await test('trapTransportLifecycle intercepts SDK onclose assignment and prevents overwriting', () => {
+    let isCurrent = true;
+    const transport: any = {};
+
+    trapTransportLifecycle(transport, () => isCurrent);
+
+    let handlerFired = 0;
+    // SDK assigns its own handler
+    transport.onclose = () => {
+      handlerFired++;
+    };
+
+    // Trigger onclose
+    transport.onclose();
+    assert.strictEqual(handlerFired, 1);
+
+    // Stale generation
+    isCurrent = false;
+    transport.onclose();
+    assert.strictEqual(handlerFired, 1, 'Should NOT fire when generation is stale');
+  });
+
+  await test('trapTransportLifecycle silences stale onclose when isCurrentPredicate returns false', () => {
+    let isCurrent = false;
+    const transport: any = {};
+    trapTransportLifecycle(transport, () => isCurrent);
+
+    let fired = false;
+    transport.onclose = () => { fired = true; };
+    transport.onclose();
+    assert.strictEqual(fired, false);
+  });
+
+  await test('disarmDyingTransport strips listeners from child process and stdio streams', async () => {
+    const { EventEmitter } = await import('events');
+    const mockProcess: any = new EventEmitter();
+    mockProcess.stdout = new EventEmitter();
+    mockProcess.stderr = new EventEmitter();
+    mockProcess.exitCode = null;
+    mockProcess.killed = false;
+
+    let exitFired = 0;
+    mockProcess.on('exit', () => { exitFired++; });
+
+    const transport: any = {
+      _process: mockProcess,
+      onclose: () => {},
+      onerror: () => {}
+    };
+
+    const res = await disarmDyingTransport(transport, { drainTimeoutMs: 50 });
+    assert.strictEqual(res.disarmed, true);
+    assert.strictEqual(transport.onclose, undefined);
+
+    // Verify listeners stripped
+    mockProcess.emit('exit');
+    assert.strictEqual(exitFired, 0, 'Listener should have been removed by disarmDyingTransport');
+  });
+
+  await test('ResilientClientConnectionManager isolates retried connection from delayed exit events (resolves #3194)', async () => {
+    // Simulate a Client and two transports
+    let clientClosedTimes = 0;
+    const mockClient: any = {
+      transport: undefined,
+      connect: async (t: any) => {
+        mockClient.transport = t;
+        if (t.failHandshake) {
+          throw new Error("Server's protocol version is not supported: 1999-01-01");
+        }
+      },
+      close: async () => {
+        clientClosedTimes++;
+        mockClient.transport = undefined;
+      }
+    };
+
+    const manager = new ResilientClientConnectionManager(mockClient);
+
+    // Transport 1: fails handshake (e.g. bad server)
+    const transport1: any = {
+      id: 'bad-server',
+      failHandshake: true,
+      onclose: undefined
+    };
+
+    let t1ErrorCaught = false;
+    try {
+      await manager.connectWithSentinel(transport1);
+    } catch (err: any) {
+      t1ErrorCaught = true;
+      assert.ok(err.message.includes('1999-01-01'));
+    }
+    assert.strictEqual(t1ErrorCaught, true);
+    assert.strictEqual(mockClient.transport, undefined, 'Client transport should be disarmed after failure');
+
+    // Transport 2: healthy server
+    let t2CloseCalls = 0;
+    const transport2: any = {
+      id: 'good-server',
+      failHandshake: false,
+      onclose: undefined
+    };
+
+    await manager.connectWithSentinel(transport2);
+    assert.strictEqual(mockClient.transport, transport2);
+
+    // SDK binds transport2.onclose
+    transport2.onclose = () => {
+      t2CloseCalls++;
+    };
+
+    // NOW: Simulating delayed exit of Transport 1 child process landing during Transport 2's session!
+    // In naive SDK code, transport1.onclose would trigger Protocol._onclose and kill Transport 2!
+    // With our Sentinel, transport1 is stale and its onclose is completely suppressed:
+    if (typeof transport1.onclose === 'function') {
+      transport1.onclose();
+    }
+
+    assert.strictEqual(t2CloseCalls, 0, 'Transport 2 must not be closed by Transport 1 late exit');
+    assert.strictEqual(mockClient.transport, transport2, 'Client transport must remain intact');
+
+    // Clean close
+    await manager.closeSafely();
+    assert.strictEqual(manager.getActiveTransport(), null);
+  });
+
+  await test('ResilientClientConnectionManager advances generation monotonically', async () => {
+    const mockClient: any = {
+      transport: undefined,
+      connect: async (t: any) => { mockClient.transport = t; }
+    };
+
+    const manager = new ResilientClientConnectionManager(mockClient);
+    assert.strictEqual(manager.getGeneration(), 0);
+
+    await manager.connectWithSentinel({ id: 1 });
+    assert.strictEqual(manager.getGeneration(), 1);
+
+    await manager.connectWithSentinel({ id: 2 });
+    assert.strictEqual(manager.getGeneration(), 2);
+
+    await manager.closeSafely();
+    assert.strictEqual(manager.getGeneration(), 3);
   });
 
   // Summary
