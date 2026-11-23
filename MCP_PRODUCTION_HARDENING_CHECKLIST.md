@@ -65,6 +65,10 @@ Whether you are building MCP servers in TypeScript, Python, or Go for Claude Des
   - *Risk*: Naive `Number(process.env.VAR)` evaluates to `NaN` when operators configure limits with unit suffixes (`10MB`, `500KB`, `30s`) or non-numeric strings. Because relational comparisons against `NaN` (`size > NaN`) always evaluate to `false`, **THE RESOURCE LIMIT IS SILENTLY DISABLED**, allowing unbounded payload fetches that trigger OOM crashes (servers #5642).
   - *Remedy*: Parse byte sizes and durations safely with unit multiplier support (`KB`, `MB`, `GB`, `ms`, `s`, `m`), clamp values within safe minimum/maximum bounds, and strictly fail-closed back to secure defaults if parsing fails.
 
+- [ ] **11. Non-Finite Float (NaN / Infinity) Schema Serialization & Client Crash Defense**:
+  - *Risk*: Math, ML, and statistical tools returning `NaN` or `Infinity` (e.g. AUC on single-class splits, zero division) convert to `null` in JSON. Clients validating against `"type": "number"` throw unhandled runtime exceptions, losing the entire tool response (python-sdk #3897, #3341).
+  - *Remedy*: Deeply sanitize non-finite floats into compliant nulls or string tokens (`"NaN"`, `"Infinity"`), provide structured tool errors on invalid calculations, and patch output schemas to permit nullable number unions.
+
 ## 3. Filesystem & Volume Persistence
 
 - [ ] **10. Strict Path Containment & Device Traversal Guards**:
@@ -147,7 +151,7 @@ Whether you are building MCP servers in TypeScript, Python, or Go for Claude Des
 
 ## Need Drop-In, Production-Ready Solutions?
 
-Every single vulnerability, edge case, and architectural invariant listed in this checklist is implemented and verified with **334 automated unit tests** in the **[MCP Production Kit](https://github.com/A7mdMe/mcp-production-kit)**:
+Every single vulnerability, edge case, and architectural invariant listed in this checklist is implemented and verified with **343 automated unit tests** in the **[MCP Production Kit](https://github.com/A7mdMe/mcp-production-kit)**:
 
 - **Free Open-Source Core**: Production-ready TypeScript starter kit with dual stdio/SSE transports, SSRF protection, clean stdio logging, and namespaced memory store.
 - **Commercial Pro Pack**: 33 drop-in modular TypeScript guards covering PostgreSQL/SQLite security, rate limiters, OAuth revocation, atomic symlinks, stream priming, and knowledge graph invariants.
