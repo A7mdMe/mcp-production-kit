@@ -37,6 +37,10 @@ Whether you are building MCP servers in TypeScript, Python, or Go for Claude Des
 
 ---
 
+- [ ] **5. Fail-Safe Stdio Request ID Recovery & Lone Surrogate Defense**:
+  - *Risk*: A request line that fails JSON validation (e.g. lone UTF-16 surrogate escapes like `\ud83d`) is dropped by standard stdio readers without emitting any reply to stdout. The client hangs until its 30s-60s timeout expires (python-sdk #3894).
+  - *Remedy*: Pre-sanitize isolated surrogates to `\uFFFD`, extract the client's request ID from malformed lines via regex fast-scan, and immediately emit a spec-compliant JSON-RPC `-32700 Parse error` envelope to unblock the client instantly.
+
 ## 2. Input Validation & Injection Defense
 
 - [ ] **5. Server-Side Request Forgery (SSRF) Blocklist**:
@@ -151,7 +155,7 @@ Whether you are building MCP servers in TypeScript, Python, or Go for Claude Des
 
 ## Need Drop-In, Production-Ready Solutions?
 
-Every single vulnerability, edge case, and architectural invariant listed in this checklist is implemented and verified with **343 automated unit tests** in the **[MCP Production Kit](https://github.com/A7mdMe/mcp-production-kit)**:
+Every single vulnerability, edge case, and architectural invariant listed in this checklist is implemented and verified with **352 automated unit tests** in the **[MCP Production Kit](https://github.com/A7mdMe/mcp-production-kit)**:
 
 - **Free Open-Source Core**: Production-ready TypeScript starter kit with dual stdio/SSE transports, SSRF protection, clean stdio logging, and namespaced memory store.
 - **Commercial Pro Pack**: 33 drop-in modular TypeScript guards covering PostgreSQL/SQLite security, rate limiters, OAuth revocation, atomic symlinks, stream priming, and knowledge graph invariants.
