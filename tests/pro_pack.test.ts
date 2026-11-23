@@ -1,4 +1,10 @@
 import {
+  sanitizeLoneSurrogatesInJson,
+  extractRequestIdFromMalformedJson,
+  createParseErrorResponse,
+  processInboundStdioLine
+} from '../pro_pack/stdio_resilient_framing_guard.ts';
+import {
   isNonFinite,
   classifyNonFinite,
   sanitizeNonFiniteValues,
@@ -4805,6 +4811,77 @@ async function runProPackTestSuite() {
     // Verify it serializes to standard JSON cleanly
     const jsonString = JSON.stringify(safeOutput);
     assert.ok(jsonString.includes('"auc":null'));
+  });
+
+  console.log('\n[Module: Resilient Stdio Line Framing & Lone Surrogate Guard]');
+
+  await test('sanitizeLoneSurrogatesInJson replaces isolated surrogate \\ud83d with \\uFFFD', () => {
+    const brokenLine = '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"text":"bad \\ud83d bad"}}';
+    const res = sanitizeLoneSurrogatesInJson(brokenLine);
+    assert.strictEqual(res.modified, true);
+    assert.ok(res.sanitized.includes('\\uFFFD'));
+    assert.ok(!res.sanitized.includes('\\ud83d'));
+  });
+
+  await test('sanitizeLoneSurrogatesInJson preserves valid surrogate pairs', () => {
+    const validPairLine = '{"jsonrpc":"2.0","id":1,"params":{"emoji":"\\uD83D\\uDE00"}}';
+    const res = sanitizeLoneSurrogatesInJson(validPairLine);
+    assert.strictEqual(res.modified, false);
+    assert.strictEqual(res.sanitized, validPairLine);
+  });
+
+  await test('extractRequestIdFromMalformedJson extracts integer ID from broken JSON', () => {
+    const broken = '{"jsonrpc":"2.0","id":42,"method":"tools/call", broken syntax here';
+    const id = extractRequestIdFromMalformedJson(broken);
+    assert.strictEqual(id, 42);
+  });
+
+  await test('extractRequestIdFromMalformedJson extracts string ID from broken JSON', () => {
+    const broken = '{"jsonrpc":"2.0","id":"req-999-xyz","method":"unknown",';
+    const id = extractRequestIdFromMalformedJson(broken);
+    assert.strictEqual(id, 'req-999-xyz');
+  });
+
+  await test('extractRequestIdFromMalformedJson returns null when id is missing or unparseable', () => {
+    const broken = '{"jsonrpc":"2.0","method":"notify"}';
+    const id = extractRequestIdFromMalformedJson(broken);
+    assert.strictEqual(id, null);
+  });
+
+  await test('createParseErrorResponse generates spec-compliant JSON-RPC -32700 error', () => {
+    const err = createParseErrorResponse(5, 'Syntax error');
+    assert.strictEqual(err.jsonrpc, '2.0');
+    assert.strictEqual(err.id, 5);
+    assert.strictEqual(err.error.code, -32700);
+    assert.strictEqual(err.error.data?.recoveredId, true);
+  });
+
+  await test('processInboundStdioLine cleanly parses valid JSON-RPC request line', () => {
+    const valid = '{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n';
+    const res = processInboundStdioLine(valid);
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(res.message.id, 1);
+    assert.strictEqual(res.message.method, 'tools/list');
+  });
+
+  await test('processInboundStdioLine auto-sanitizes lone surrogate and parses cleanly (resolves python-sdk #3894)', () => {
+    const lineWithLoneSurrogate = '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"echo","arguments":{"text":"bad \\ud83d bad"}}}';
+    const res = processInboundStdioLine(lineWithLoneSurrogate, { autoSanitizeSurrogates: true });
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(res.sanitizedSurrogates, true);
+    assert.strictEqual(res.message.id, 3);
+    assert.ok(res.message.params.arguments.text.includes('\uFFFD'));
+  });
+
+  await test('processInboundStdioLine emits -32700 with recovered ID on malformed JSON line preventing client hang', () => {
+    // Malformed JSON that cannot be parsed
+    const malformed = '{"jsonrpc":"2.0","id":7,"method":"tools/call","params": {invalid json';
+    const res = processInboundStdioLine(malformed);
+    assert.strictEqual(res.success, false);
+    assert.notStrictEqual(res.errorResponse, undefined);
+    assert.strictEqual(res.errorResponse?.id, 7);
+    assert.strictEqual(res.errorResponse?.error.code, -32700);
+    assert.strictEqual(res.recoveredId, 7);
   });
 
   // Summary
