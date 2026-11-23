@@ -1,4 +1,12 @@
 import {
+  isNonFinite,
+  classifyNonFinite,
+  sanitizeNonFiniteValues,
+  patchToolOutputSchema,
+  safeJsonStringifyWithNonFinite,
+  formatSafeToolResponse
+} from '../pro_pack/non_finite_float_guard.ts';
+import {
   parseByteSizeSafely,
   parseDurationSafely,
   enforceResourceLimit,
@@ -4657,6 +4665,146 @@ async function runProPackTestSuite() {
     assert.strictEqual(audit.warnings.length, 0);
     assert.strictEqual(audit.parsedLimits['MAX_PAYLOAD'], 50000);
     assert.strictEqual(audit.parsedLimits['TIMEOUT_MS'], 10000);
+  });
+
+  console.log('\n[Module: Non-Finite Float Sanitizer & Schema-Safe Coercion Guard]');
+
+  await test('isNonFinite identifies NaN, Infinity, -Infinity and ignores regular numbers', () => {
+    assert.strictEqual(isNonFinite(NaN), true);
+    assert.strictEqual(isNonFinite(Infinity), true);
+    assert.strictEqual(isNonFinite(-Infinity), true);
+    assert.strictEqual(isNonFinite(0), false);
+    assert.strictEqual(isNonFinite(42.5), false);
+    assert.strictEqual(isNonFinite(-100), false);
+    assert.strictEqual(isNonFinite('NaN'), false);
+    assert.strictEqual(isNonFinite(null), false);
+    assert.strictEqual(isNonFinite(undefined), false);
+  });
+
+  await test('classifyNonFinite accurately tags NaN, +Infinity, -Infinity', () => {
+    assert.strictEqual(classifyNonFinite(NaN), 'NaN');
+    assert.strictEqual(classifyNonFinite(Infinity), '+Infinity');
+    assert.strictEqual(classifyNonFinite(-Infinity), '-Infinity');
+    assert.strictEqual(classifyNonFinite(123), null);
+    assert.strictEqual(classifyNonFinite('text'), null);
+  });
+
+  await test('sanitizeNonFiniteValues in null mode replaces non-finite values and tracks field modifications', () => {
+    const payload = {
+      model: 'xgboost',
+      metrics: {
+        accuracy: 0.95,
+        auc: NaN,
+        perplexity: Infinity,
+        loss: -Infinity
+      },
+      tags: ['evaluation', NaN]
+    };
+
+    const res = sanitizeNonFiniteValues(payload, { strategy: 'null' });
+    assert.strictEqual(res.hasNonFinite, true);
+    assert.strictEqual(res.nonFiniteCount, 4);
+    assert.strictEqual(res.sanitized.metrics.accuracy, 0.95);
+    assert.strictEqual(res.sanitized.metrics.auc, null);
+    assert.strictEqual(res.sanitized.metrics.perplexity, null);
+    assert.strictEqual(res.sanitized.metrics.loss, null);
+    assert.strictEqual(res.sanitized.tags[1], null);
+
+    const paths = res.modifications.map(m => m.path);
+    assert.ok(paths.includes('metrics.auc'));
+    assert.ok(paths.includes('metrics.perplexity'));
+    assert.ok(paths.includes('metrics.loss'));
+    assert.ok(paths.includes('tags[1]'));
+  });
+
+  await test('sanitizeNonFiniteValues in token mode preserves string representations (NaN, Infinity)', () => {
+    const payload = {
+      score: NaN,
+      ratio: Infinity
+    };
+
+    const res = sanitizeNonFiniteValues(payload, { strategy: 'token' });
+    assert.strictEqual(res.sanitized.score, 'NaN');
+    assert.strictEqual(res.sanitized.ratio, 'Infinity');
+  });
+
+  await test('sanitizeNonFiniteValues in clamp mode bounds +Infinity to MAX_VALUE and NaN to fallback', () => {
+    const payload = {
+      overflow: Infinity,
+      underflow: -Infinity,
+      undefinedMetric: NaN
+    };
+
+    const res = sanitizeNonFiniteValues(payload, { strategy: 'clamp', clampFallback: 0.0 });
+    assert.strictEqual(res.sanitized.overflow, Number.MAX_VALUE);
+    assert.strictEqual(res.sanitized.underflow, -Number.MAX_VALUE);
+    assert.strictEqual(res.sanitized.undefinedMetric, 0.0);
+  });
+
+  await test('sanitizeNonFiniteValues in tool-error mode returns structured error response when non-finite values found', () => {
+    const payload = {
+      auc: NaN
+    };
+
+    const res = sanitizeNonFiniteValues(payload, { strategy: 'tool-error' });
+    assert.strictEqual(res.hasNonFinite, true);
+    assert.notStrictEqual(res.toolErrorResult, undefined);
+    assert.strictEqual(res.toolErrorResult?.isError, true);
+    assert.ok(res.toolErrorResult?.content[0].text.includes('Field "auc" evaluated to NaN'));
+  });
+
+  await test('patchToolOutputSchema transforms number types into nullable number types', () => {
+    const originalSchema = {
+      type: 'object',
+      properties: {
+        accuracy: { type: 'number', description: 'Model accuracy' },
+        auc: { type: 'number', description: 'Area under ROC curve' },
+        name: { type: 'string' }
+      },
+      required: ['accuracy', 'auc']
+    };
+
+    const patched = patchToolOutputSchema(originalSchema);
+    assert.deepStrictEqual(patched.properties.accuracy.type, ['number', 'null']);
+    assert.deepStrictEqual(patched.properties.auc.type, ['number', 'null']);
+    assert.strictEqual(patched.properties.name.type, 'string');
+  });
+
+  await test('safeJsonStringifyWithNonFinite produces valid JSON without throwing or corrupting', () => {
+    const payload = {
+      calculation: 'test',
+      val: NaN,
+      upper: Infinity
+    };
+
+    const jsonStr = safeJsonStringifyWithNonFinite(payload, { strategy: 'token' });
+    const parsed = JSON.parse(jsonStr);
+    assert.strictEqual(parsed.val, 'NaN');
+    assert.strictEqual(parsed.upper, 'Infinity');
+  });
+
+  await test('formatSafeToolResponse safely wraps ML metrics evaluation payload preventing client crash (resolves python-sdk #3897)', () => {
+    // Simulates the exact failure case in python-sdk #3897:
+    // Tool returns metrics where AUC is NaN because dataset has a single class.
+    const mlEvaluationResult = {
+      model_id: 'xgboost-classifier-v1',
+      dataset: 'eval-split-b',
+      metrics: {
+        accuracy: 0.92,
+        precision: 0.88,
+        recall: 0.95,
+        auc: NaN // undefined on single class
+      }
+    };
+
+    // Safe formatting replaces NaN with null, allowing downstream schema validation to pass
+    const safeOutput = formatSafeToolResponse(mlEvaluationResult, { strategy: 'null' });
+    assert.strictEqual(safeOutput.metrics.accuracy, 0.92);
+    assert.strictEqual(safeOutput.metrics.auc, null);
+
+    // Verify it serializes to standard JSON cleanly
+    const jsonString = JSON.stringify(safeOutput);
+    assert.ok(jsonString.includes('"auc":null'));
   });
 
   // Summary
