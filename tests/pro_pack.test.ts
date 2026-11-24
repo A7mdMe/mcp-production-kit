@@ -1,4 +1,9 @@
 import {
+  GraphMemoryIntegrityGuard,
+  type EntityRecord,
+  type RelationRecord
+} from '../pro_pack/graph_memory_integrity_guard.ts';
+import {
   detectIndentation,
   auditWorkspaceDependencySkew,
   reconcileManifest,
@@ -5160,6 +5165,134 @@ async function runProPackTestSuite() {
 
     // Clean up
     fs.rmSync(monoDir, { recursive: true, force: true });
+  });
+
+
+  // =========================================================================
+  // Module: Graph Memory Integrity & Agent Relation Guard (servers #5653, #5654, #5655)
+  // =========================================================================
+  console.log('\n[Module: Graph Memory Integrity & Agent Relation Guard]');
+  const graphGuard = new GraphMemoryIntegrityGuard();
+
+  await test('sanitizeCreateEntities deduplicates repeated observations during entity creation (resolves servers #5653)', () => {
+    const rawEntities: EntityRecord[] = [
+      {
+        name: 'NodeA',
+        entityType: 'service',
+        observations: ['x', 'x', 'y', 'x', '  y  ']
+      }
+    ];
+    const existing = new Set<string>();
+    const res = graphGuard.sanitizeCreateEntities(rawEntities, existing);
+
+    assert.strictEqual(res.toCreate.length, 1);
+    assert.strictEqual(res.skippedNames.length, 0);
+    assert.deepStrictEqual(res.toCreate[0].observations, ['x', 'y'], 'Observations must be strictly deduplicated on creation');
+  });
+
+  await test('sanitizeCreateEntities skips pre-existing entity names with structured notice', () => {
+    const rawEntities: EntityRecord[] = [
+      { name: 'NodeA', entityType: 'service', observations: ['obs1'] },
+      { name: 'NodeB', entityType: 'service', observations: ['obs2'] }
+    ];
+    const existing = new Set<string>(['nodea', 'NodeA']);
+    const res = graphGuard.sanitizeCreateEntities(rawEntities, existing);
+
+    assert.strictEqual(res.toCreate.length, 1);
+    assert.strictEqual(res.toCreate[0].name, 'NodeB');
+    assert.deepStrictEqual(res.skippedNames, ['NodeA']);
+    assert.ok(res.notice?.includes('Skipped 1 entity that already exists'));
+  });
+
+  await test('sanitizeCreateRelations returns explicit skipped array and text notice for existing relations (resolves servers #5654)', () => {
+    const existingRelations: RelationRecord[] = [
+      { from: 'NodeA', to: 'NodeB', relationType: 'connects_to' }
+    ];
+    const incoming: RelationRecord[] = [
+      { from: 'NodeA', to: 'NodeB', relationType: 'connects_to' },
+      { from: 'NodeA', to: 'NodeC', relationType: 'depends_on' }
+    ];
+
+    const res = graphGuard.sanitizeCreateRelations(incoming, existingRelations);
+
+    assert.strictEqual(res.toCreate.length, 1);
+    assert.strictEqual(res.toCreate[0].to, 'NodeC');
+    assert.strictEqual(res.skipped.length, 1, 'Existing relation must be reported in skipped array');
+    assert.strictEqual(res.skipped[0].reason, 'ALREADY_EXISTS');
+    assert.strictEqual(res.skipped[0].relation.to, 'NodeB');
+    assert.ok(res.notice?.includes('Skipped 1 relation (1 already existed)'), 'Must include human-readable agent notice');
+  });
+
+  await test('sanitizeCreateRelations detects and flags ENTITY_NOT_FOUND when entity names are provided', () => {
+    const existingEntities = new Set<string>(['NodeA', 'NodeB']);
+    const incoming: RelationRecord[] = [
+      { from: 'NodeA', to: 'GhostNode', relationType: 'calls' }
+    ];
+
+    const res = graphGuard.sanitizeCreateRelations(incoming, [], existingEntities);
+    assert.strictEqual(res.toCreate.length, 0);
+    assert.strictEqual(res.skipped.length, 1);
+    assert.strictEqual(res.skipped[0].reason, 'ENTITY_NOT_FOUND');
+    assert.ok(res.notice?.includes('referenced non-existent entities'));
+  });
+
+  await test('sanitizeCreateRelations deduplicates duplicate relations within the same batch payload', () => {
+    const incoming: RelationRecord[] = [
+      { from: 'NodeA', to: 'NodeB', relationType: 'knows' },
+      { from: 'NodeA', to: 'NodeB', relationType: 'knows' }
+    ];
+
+    const res = graphGuard.sanitizeCreateRelations(incoming, []);
+    assert.strictEqual(res.toCreate.length, 1);
+    assert.strictEqual(res.skipped.length, 1);
+    assert.strictEqual(res.skipped[0].reason, 'ALREADY_EXISTS');
+  });
+
+  await test('sanitizeDeleteObservations normalizes repeated request items preventing false matched-nothing reports (resolves servers #5655)', () => {
+    const requested = ['x', 'x', 'z'];
+    const current = ['x', 'y'];
+
+    const res = graphGuard.sanitizeDeleteObservations('NodeA', requested, current);
+
+    assert.strictEqual(res.totalDeleted, 1, 'Only 1 actual observation deleted');
+    assert.deepStrictEqual(res.deletedObservations, ['x']);
+    assert.deepStrictEqual(res.skippedObservations, ['z'], 'Item z not present must be reported cleanly');
+    assert.ok(res.notice?.includes('Skipped 1 observations not present on entity NodeA'));
+  });
+
+  await test('sanitizeDeleteRelations normalizes repeated request items and counts accurately (resolves servers #5655)', () => {
+    const current: RelationRecord[] = [
+      { from: 'A', to: 'B', relationType: 'knows' }
+    ];
+    const requested: RelationRecord[] = [
+      { from: 'A', to: 'B', relationType: 'knows' },
+      { from: 'A', to: 'B', relationType: 'knows' },
+      { from: 'A', to: 'C', relationType: 'knows' }
+    ];
+
+    const res = graphGuard.sanitizeDeleteRelations(requested, current);
+
+    assert.strictEqual(res.totalDeleted, 1);
+    assert.strictEqual(res.deletedRelations.length, 1);
+    assert.strictEqual(res.skippedRelations.length, 1);
+    assert.ok(res.notice?.includes('Skipped 1 relations not present in graph'));
+  });
+
+  await test('End-to-end memory pipeline preserves observation count invariants across create, add, and delete', () => {
+    // 1. Create with duplicates
+    const createStep = graphGuard.sanitizeCreateEntities(
+      [{ name: 'ServiceX', entityType: 'microservice', observations: ['v1', 'v1'] }],
+      new Set()
+    );
+    assert.deepStrictEqual(createStep.toCreate[0].observations, ['v1'], 'Creation must have exactly 1 observation');
+
+    // 2. Add observation 'v2'
+    const currentObs = [...createStep.toCreate[0].observations, 'v2'];
+    assert.strictEqual(currentObs.length, 2);
+
+    // 3. Delete observation 'v1'
+    const deleteStep = graphGuard.sanitizeDeleteObservations('ServiceX', ['v1', 'v1'], currentObs);
+    assert.strictEqual(deleteStep.totalDeleted, 1, 'Must not report deleted 2 of 1');
   });
 
   // Summary
