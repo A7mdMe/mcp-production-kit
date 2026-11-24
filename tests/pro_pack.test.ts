@@ -1,4 +1,10 @@
 import {
+  detectIndentation,
+  auditWorkspaceDependencySkew,
+  reconcileManifest,
+  synchronizeMonorepoMigration
+} from '../pro_pack/monorepo_migration_guard.ts';
+import {
   trapTransportLifecycle,
   disarmDyingTransport,
   ResilientClientConnectionManager
@@ -5034,6 +5040,126 @@ async function runProPackTestSuite() {
 
     await manager.closeSafely();
     assert.strictEqual(manager.getGeneration(), 3);
+  });
+
+  console.log('\n[Module: Monorepo Workspace Manifest Reconciler & Migration Guard]');
+
+  await test('detectIndentation detects 2-space, 4-space, and tab indentations', () => {
+    const twoSpace = '{\n  "name": "pkg"\n}';
+    const fourSpace = '{\n    "name": "pkg"\n}';
+    const tabIndent = '{\n\t"name": "pkg"\n}';
+
+    assert.strictEqual(detectIndentation(twoSpace), 2);
+    assert.strictEqual(detectIndentation(fourSpace), 4);
+    assert.strictEqual(detectIndentation(tabIndent), '\t');
+  });
+
+  await test('auditWorkspaceDependencySkew detects split-brain v1 vs v2 packages across workspaces', () => {
+    const manifests = [
+      {
+        path: '/repo/packages/core/package.json',
+        name: '@repo/core',
+        dependencies: { '@modelcontextprotocol/client': '^2.4.0' }
+      },
+      {
+        path: '/repo/packages/server-a/package.json',
+        name: '@repo/server-a',
+        dependencies: { '@modelcontextprotocol/sdk': '^1.32.1' } // Unmigrated v1!
+      }
+    ];
+
+    const report = auditWorkspaceDependencySkew(manifests);
+    assert.strictEqual(report.isConsistent, false);
+    assert.strictEqual(report.v1Members.length, 1);
+    assert.strictEqual(report.v2Members.length, 1);
+    assert.ok(report.skewWarnings[0].includes('split-brain MCP dependencies'));
+  });
+
+  await test('reconcileManifest swaps @modelcontextprotocol/sdk for client and server in dependencies', () => {
+    const tmpDir = path.resolve('C:/Users/A7md/.gemini/antigravity/scratch/autonomous_10usd_venture/scratch_test_pkg');
+    if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+
+    const pkgPath = path.join(tmpDir, 'package.json');
+    const initialPkg = {
+      name: '@test/member-pkg',
+      version: '1.0.0',
+      dependencies: {
+        '@modelcontextprotocol/sdk': '^1.32.1',
+        'zod': '^3.24.0'
+      }
+    };
+    fs.writeFileSync(pkgPath, JSON.stringify(initialPkg, null, 2), 'utf8');
+
+    const diff = reconcileManifest(pkgPath, { targetV2Version: '^2.4.0' });
+    assert.strictEqual(diff.modified, true);
+    assert.ok(diff.removed.includes('@modelcontextprotocol/sdk'));
+    assert.ok('@modelcontextprotocol/client' in diff.added);
+    assert.ok('@modelcontextprotocol/server' in diff.added);
+
+    const updated = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+    assert.strictEqual(updated.dependencies['@modelcontextprotocol/sdk'], undefined);
+    assert.strictEqual(updated.dependencies['@modelcontextprotocol/client'], '^2.4.0');
+    assert.strictEqual(updated.dependencies['@modelcontextprotocol/server'], '^2.4.0');
+    assert.strictEqual(updated.dependencies['zod'], '^3.24.0', 'Non-MCP deps must be preserved');
+
+    // Clean up
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  await test('reconcileManifest handles dryRun mode without modifying disk files', () => {
+    const tmpDir = path.resolve('C:/Users/A7md/.gemini/antigravity/scratch/autonomous_10usd_venture/scratch_dry_run');
+    if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+
+    const pkgPath = path.join(tmpDir, 'package.json');
+    const initialPkg = {
+      name: '@test/dry-run',
+      dependencies: { '@modelcontextprotocol/sdk': '^1.0.0' }
+    };
+    fs.writeFileSync(pkgPath, JSON.stringify(initialPkg, null, 2), 'utf8');
+
+    const diff = reconcileManifest(pkgPath, { dryRun: true });
+    assert.strictEqual(diff.modified, true);
+
+    // Verify disk content unchanged
+    const diskContent = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+    assert.strictEqual(diskContent.dependencies['@modelcontextprotocol/sdk'], '^1.0.0');
+
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  await test('synchronizeMonorepoMigration updates member manifests across workspace directories (resolves #3230)', () => {
+    // Create mock monorepo structure
+    const monoDir = path.resolve('C:/Users/A7md/.gemini/antigravity/scratch/autonomous_10usd_venture/scratch_monorepo');
+    const member1Dir = path.join(monoDir, 'packages', 'member-client');
+    const member2Dir = path.join(monoDir, 'packages', 'member-server');
+
+    fs.mkdirSync(member1Dir, { recursive: true });
+    fs.mkdirSync(member2Dir, { recursive: true });
+
+    // Root package.json (no sdk dependency)
+    fs.writeFileSync(path.join(monoDir, 'package.json'), JSON.stringify({ name: 'monorepo-root', private: true }, null, 2));
+
+    // Member 1 (declares v1 sdk)
+    fs.writeFileSync(path.join(member1Dir, 'package.json'), JSON.stringify({
+      name: '@mono/member-client',
+      dependencies: { '@modelcontextprotocol/sdk': '^1.30.0' }
+    }, null, 2));
+
+    // Member 2 (declares v1 sdk in devDependencies)
+    fs.writeFileSync(path.join(member2Dir, 'package.json'), JSON.stringify({
+      name: '@mono/member-server',
+      devDependencies: { '@modelcontextprotocol/sdk': '^1.30.0' }
+    }, null, 2));
+
+    // Synchronize
+    const syncRes = synchronizeMonorepoMigration(monoDir, { targetV2Version: '^2.4.0' });
+    assert.strictEqual(syncRes.reconciledCount, 2, 'Both workspace members must be reconciled');
+    assert.strictEqual(syncRes.audit.isConsistent, true, 'Monorepo must be consistent after sync');
+    assert.strictEqual(syncRes.audit.v1Members.length, 0);
+    assert.strictEqual(syncRes.audit.v2Members.length, 2);
+
+    // Clean up
+    fs.rmSync(monoDir, { recursive: true, force: true });
   });
 
   // Summary
