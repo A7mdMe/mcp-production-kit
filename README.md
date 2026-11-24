@@ -37,6 +37,7 @@
 | **Stdio Lifecycle & Epoch Fence** | - | **Monotonic epoch fence, eliminates Connection closed races & reaps orphans** |
 | **Client Session Invariants** | - | **Fail-closed discovery on closed client, prevents hallucinated empty tools** |
 | **Subscription Router Guard** | - | **Zero-slot graceful completion for unadvertised filters, prevents DoS** |
+| **Monorepo Workspace Reconciler** | - | **Bi-directional manifest sync & v1/v2 skew auditing (#3230)** |
 | **Stdio Lifecycle Sentinel** | - | **Trapped onclose descriptor & delayed-exit isolation on retries (#3194)** |
 | **Resilient Stdio Framing** | - | **Lone surrogate sanitization & fail-safe -32700 ID recovery (#3894)** |
 | **Non-Finite Float & Schema Guard** | - | **NaN/+Inf/-Inf sanitization & outputSchema nullable union adaptation (#3897)** |
@@ -179,8 +180,9 @@ docker run -p 3000:3000 -e TRANSPORT=sse mcp-production-kit
 
 ## Commercial Pro Pack ($19 One-Time)
 
-For production cloud deployments, multi-agent frameworks, and enterprise teams, the **Pro Pack** provides drop-in, battle-tested extensions with 349 dedicated automated unit tests (357 total across the project):
+For production cloud deployments, multi-agent frameworks, and enterprise teams, the **Pro Pack** provides drop-in, battle-tested extensions with 354 dedicated automated unit tests (362 total across the project):
 
+* **Monorepo Workspace Manifest Reconciler & Migration Guard:** Eliminates broken builds and half-migrated split-brain configurations during MCP v1-to-v2 migrations in monorepos (pnpm, npm/yarn workspaces, Lerna) (resolving typescript-sdk #3230). Automatically discovers all workspace member packages, bi-directionally maps rewritten TypeScript source files to their enclosing `package.json`, performs atomic dependency swaps (`@modelcontextprotocol/sdk` to `@modelcontextprotocol/client` and `@modelcontextprotocol/server`), preserves formatting and indentation, and audits trees for version skew.
 * **Stdio Connection Lifecycle Sentinel & Transport Isolation Guard:** Eliminates `Connection closed` race conditions when retrying `client.connect()` on the same Client instance after failed handshakes or with stubborn child processes (resolving typescript-sdk #3194, #3198). Uses `Object.defineProperty` property descriptor traps to prevent the SDK from overwriting lifecycle guards, actively disarms event listeners on dying subprocesses to neutralize late SIGTERM/SIGKILL exit signals, and enforces monotonic generation barriers.
 * **Resilient Stdio Line Framing & Lone Surrogate Guard:** Eliminates 30s-60s client timeout freezes caused by unparseable JSON lines or lone UTF-16 surrogate escapes (`\ud83d`) dropped by standard stdio readers (resolving python-sdk #3894). Pre-sanitizes isolated surrogates to `\uFFFD` without corrupting valid emoji pairs, extracts the client request ID from malformed payloads via regex fast-scan, and immediately emits a standard JSON-RPC `-32700 Parse error` response carrying the client ID to unblock callers in 0ms.
 * **Non-Finite Float Sanitizer & Schema-Safe Coercion Guard:** Eliminates client-side crashes and schema validation exceptions caused by mathematical, ML, and statistical tools returning non-finite floats (NaN, +Infinity, -Infinity) (resolving python-sdk #3897, #3341). Features deep object and array traversal, configurable sanitization (null substitution, token preservation, boundary clamping, and structured tool-error envelopes), and automated outputSchema patching to allow nullable number unions without breaking client runners.
@@ -220,7 +222,7 @@ For production cloud deployments, multi-agent frameworks, and enterprise teams, 
 * **Cloudflare Workers & Docker Compose:** Serverless edge hosting with streaming SSE, plus unprivileged non-root container deployment.
 
 **[Get Pro Pack ($19.00 USD) — Instant Checkout on Whop](https://whop.com/checkout/plan_eiKHeRpooY3yc)**  
-*(Delivery: Instant download of `mcp-pro-pack-v3.15.0.zip` via Whop Files and customer billing portal upon completion).*
+*(Delivery: Instant download of `mcp-pro-pack-v3.16.0.zip` via Whop Files and customer billing portal upon completion).*
 
 ---
 
