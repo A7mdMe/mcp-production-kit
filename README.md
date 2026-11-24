@@ -7,6 +7,7 @@
 [![MCP Spec](https://img.shields.io/badge/MCP%20Spec-2024--11--05-green.svg)](https://modelcontextprotocol.io/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![A7mdMe/mcp-production-kit MCP server](https://glama.ai/mcp/servers/A7mdMe/mcp-production-kit/badges/score.svg)](https://glama.ai/mcp/servers/A7mdMe/mcp-production-kit)
+[![MCP Production Hardened](https://img.shields.io/badge/MCP-Production_Hardened-2ea44f?logo=github)](https://github.com/A7mdMe/mcp-production-kit)
 
 ---
 
@@ -37,6 +38,7 @@
 | **Stdio Lifecycle & Epoch Fence** | - | **Monotonic epoch fence, eliminates Connection closed races & reaps orphans** |
 | **Client Session Invariants** | - | **Fail-closed discovery on closed client, prevents hallucinated empty tools** |
 | **Subscription Router Guard** | - | **Zero-slot graceful completion for unadvertised filters, prevents DoS** |
+| **Graph Memory & Idempotency Guard** | - | **Explicit skipped relation feedback (#5654), observation deduplication parity (#5653), idempotent deletes (#5655)** |
 | **Monorepo Workspace Reconciler** | - | **Bi-directional manifest sync & v1/v2 skew auditing (#3230)** |
 | **Stdio Lifecycle Sentinel** | - | **Trapped onclose descriptor & delayed-exit isolation on retries (#3194)** |
 | **Resilient Stdio Framing** | - | **Lone surrogate sanitization & fail-safe -32700 ID recovery (#3894)** |
