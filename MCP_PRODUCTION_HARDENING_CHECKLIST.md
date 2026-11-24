@@ -45,6 +45,10 @@ Whether you are building MCP servers in TypeScript, Python, or Go for Claude Des
   - *Risk*: A failed handshake leaves `client.transport` set; retrying on the same Client causes the first child's delayed exit to trigger `onclose` on the new connection, rejecting it with `Connection closed` (typescript-sdk #3194).
   - *Remedy*: Trap `transport.onclose` via `Object.defineProperty` so SDK reassignments cannot overwrite generation guards, disarm all listeners on dying subprocesses, and reset `client.transport` before retrying.
 
+- [ ] **7. Monorepo Workspace Manifest Reconciliation & Half-Migration Defense**:
+  - *Risk*: v1-to-v2 codemods rewrite workspace member source files to v2 imports without updating member `package.json` manifests, causing broken builds and split-brain dependency skew despite exiting with code 0 (typescript-sdk #3230).
+  - *Remedy*: Atomically map rewritten files to member manifests, swap v1 SDK for v2 packages across all workspace packages, preserve formatting, and fail CI if any member manifest is left un-synchronized.
+
 ## 2. Input Validation & Injection Defense
 
 - [ ] **5. Server-Side Request Forgery (SSRF) Blocklist**:
@@ -159,7 +163,7 @@ Whether you are building MCP servers in TypeScript, Python, or Go for Claude Des
 
 ## Need Drop-In, Production-Ready Solutions?
 
-Every single vulnerability, edge case, and architectural invariant listed in this checklist is implemented and verified with **357 automated unit tests** in the **[MCP Production Kit](https://github.com/A7mdMe/mcp-production-kit)**:
+Every single vulnerability, edge case, and architectural invariant listed in this checklist is implemented and verified with **362 automated unit tests** in the **[MCP Production Kit](https://github.com/A7mdMe/mcp-production-kit)**:
 
 - **Free Open-Source Core**: Production-ready TypeScript starter kit with dual stdio/SSE transports, SSRF protection, clean stdio logging, and namespaced memory store.
 - **Commercial Pro Pack**: 33 drop-in modular TypeScript guards covering PostgreSQL/SQLite security, rate limiters, OAuth revocation, atomic symlinks, stream priming, and knowledge graph invariants.
