@@ -173,3 +173,8 @@ Every single vulnerability, edge case, and architectural invariant listed in thi
 
 ---
 *Maintained by [A7mdMe](https://github.com/A7mdMe). Contributions and additions to this checklist are welcome via pull requests!*
+
+- [x] **Item 10: Graph Memory Idempotency & Observation Parity (servers #5653, #5654, #5655)**
+  - *Risk:* In agent memory servers, `create_relations` silently returns empty results on duplicate creation with no notice, while `create_entities` allows duplicate observations that break deletion arithmetic ("Deleted 2 of 1").
+  - *Hardening:* Enforce invariant deduplication on entity ingestion, return structured `skipped` arrays with reasons (`ALREADY_EXISTS`, `ENTITY_NOT_FOUND`), and normalize repeated deletion payloads.
+  - *Reference:* `graph_memory_integrity_guard.ts` (Pro Pack Module 40).
