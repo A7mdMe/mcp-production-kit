@@ -178,3 +178,8 @@ Every single vulnerability, edge case, and architectural invariant listed in thi
   - *Risk:* In agent memory servers, `create_relations` silently returns empty results on duplicate creation with no notice, while `create_entities` allows duplicate observations that break deletion arithmetic ("Deleted 2 of 1").
   - *Hardening:* Enforce invariant deduplication on entity ingestion, return structured `skipped` arrays with reasons (`ALREADY_EXISTS`, `ENTITY_NOT_FOUND`), and normalize repeated deletion payloads.
   - *Reference:* `graph_memory_integrity_guard.ts` (Pro Pack Module 40).
+
+- [x] **Item 11: Server Metadata & Tool Schema Integrity Pinning (python-sdk #3907)**
+  - *Risk:* Remote MCP servers can silently alter advertised tool descriptions or parameters between sessions, introducing prompt injection instructions or exfiltration channels into the agent loop.
+  - *Hardening:* Enforce Trust-On-First-Use (TOFU) cryptographic pinning with canonical SHA-256 fingerprinting and semantic diff inspection. Fail closed in `enforce` mode on unpinned tool modifications.
+  - *Reference:* `metadata_integrity_pinning_guard.ts` (Pro Pack Module 41).
