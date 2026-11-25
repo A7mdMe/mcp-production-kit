@@ -188,3 +188,8 @@ Every single vulnerability, edge case, and architectural invariant listed in thi
   - *Risk:* External CLI / extraction subprocesses running under static wall-clock timeouts get killed prematurely during high CPU contention or parallel CI runs.
   - *Hardening:* Implement activity-based heartbeat timeout extensions, adaptive load scaling, and graceful secondary extractors to prevent fatal tool call crashes.
   - *Reference:* `resilient_subprocess_runner.ts` (Pro Pack Module 42).
+
+- [x] **Item 13: Synchronous Stream Slot Reservation & TOCTOU Conflict Defense (python-sdk #3891)**
+  - *Risk:* In Streamable HTTP transports, asynchronous registration of SSE stream slots allows concurrent GET requests to bypass the 409 Conflict check, spawning duplicate streams and corrupting agent events.
+  - *Hardening:* Enforce zero-yield synchronous atomic slot reservation (Claim-Commit-Release) with monotonic generation barriers and standard HTTP 409 Retry-After responses.
+  - *Reference:* `stream_slot_reservation_guard.ts` (Pro Pack Module 43).
