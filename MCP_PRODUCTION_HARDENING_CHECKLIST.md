@@ -183,3 +183,8 @@ Every single vulnerability, edge case, and architectural invariant listed in thi
   - *Risk:* Remote MCP servers can silently alter advertised tool descriptions or parameters between sessions, introducing prompt injection instructions or exfiltration channels into the agent loop.
   - *Hardening:* Enforce Trust-On-First-Use (TOFU) cryptographic pinning with canonical SHA-256 fingerprinting and semantic diff inspection. Fail closed in `enforce` mode on unpinned tool modifications.
   - *Reference:* `metadata_integrity_pinning_guard.ts` (Pro Pack Module 41).
+
+- [x] **Item 12: Progress-Aware Subprocess Execution & Machine Load Resilience (servers #5658)**
+  - *Risk:* External CLI / extraction subprocesses running under static wall-clock timeouts get killed prematurely during high CPU contention or parallel CI runs.
+  - *Hardening:* Implement activity-based heartbeat timeout extensions, adaptive load scaling, and graceful secondary extractors to prevent fatal tool call crashes.
+  - *Reference:* `resilient_subprocess_runner.ts` (Pro Pack Module 42).
