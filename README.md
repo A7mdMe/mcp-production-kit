@@ -38,6 +38,7 @@
 | **Stdio Lifecycle & Epoch Fence** | - | **Monotonic epoch fence, eliminates Connection closed races & reaps orphans** |
 | **Client Session Invariants** | - | **Fail-closed discovery on closed client, prevents hallucinated empty tools** |
 | **Subscription Router Guard** | - | **Zero-slot graceful completion for unadvertised filters, prevents DoS** |
+| **Stream Slot Reservation Guard** | - | **Synchronous atomic slot reservation, two-phase stream states & TOCTOU 409 defense (#3891)** |
 | **Resilient Subprocess Execution Guard** | - | **Progress-aware heartbeat timeouts, load scaling & graceful fallback extractors (#5658)** |
 | **Metadata Integrity Pinning Guard** | - | **Trust-On-First-Use (TOFU) cryptographic fingerprinting & prompt-injection defense (#3907)** |
 | **Graph Memory & Idempotency Guard** | - | **Explicit skipped relation feedback (#5654), observation deduplication parity (#5653), idempotent deletes (#5655)** |
