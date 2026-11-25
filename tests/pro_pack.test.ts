@@ -1,4 +1,9 @@
 import {
+  StreamSlotReservationGuard,
+  StreamConflictError,
+  type StreamAcquisitionResult
+} from '../pro_pack/stream_slot_reservation_guard.ts';
+import {
   ResilientSubprocessRunner,
   SubprocessTimeoutError,
   calculateAdaptiveLoadMultiplier
@@ -5528,6 +5533,101 @@ async function runProPackTestSuite() {
     assert.strictEqual(outcome.usedFallback, true);
     assert.strictEqual(outcome.result.text, 'fallback_extracted_content');
     assert.ok(outcome.error?.message.includes('Readability engine killed'));
+  });
+
+
+  // =========================================================================
+  // Module: Stream Slot Reservation Guard & SSE TOCTOU Conflict Resolver (python-sdk #3891)
+  // =========================================================================
+  console.log('\n[Module: Stream Slot Reservation Guard & SSE TOCTOU Conflict Resolver]');
+  const slotGuard = new StreamSlotReservationGuard({ retryAfterSeconds: 2, pendingTimeoutMs: 1000 });
+
+  await test('acquireSlot synchronously and atomically claims slot in PENDING state', () => {
+    const res = slotGuard.acquireSlot('session_alpha');
+    assert.strictEqual(res.success, true);
+    assert.strictEqual(res.slot?.state, 'PENDING');
+    assert.strictEqual(typeof res.generation, 'number');
+  });
+
+  await test('acquireSlot immediately rejects concurrent claim on same key with 409 conflict (resolves #3891)', () => {
+    // Session alpha is currently pending from prior test
+    const concurrentRes = slotGuard.acquireSlot('session_alpha');
+    assert.strictEqual(concurrentRes.success, false);
+    assert.ok(concurrentRes.conflictError instanceof StreamConflictError);
+    assert.strictEqual(concurrentRes.conflictError.currentState, 'PENDING');
+    assert.strictEqual(concurrentRes.conflictError.retryAfterSeconds, 2);
+  });
+
+  await test('commitSlot transitions slot from PENDING to ACTIVE upon stream start', () => {
+    const slot = slotGuard.getSlot('session_alpha');
+    assert.ok(slot);
+    const committed = slotGuard.commitSlot('session_alpha', slot.generation);
+    assert.strictEqual(committed, true);
+    assert.strictEqual(slotGuard.getSlot('session_alpha')?.state, 'ACTIVE');
+  });
+
+  await test('commitSlot rejects outdated generation and preserves current stream', () => {
+    const committed = slotGuard.commitSlot('session_alpha', 99999);
+    assert.strictEqual(committed, false);
+    assert.strictEqual(slotGuard.getSlot('session_alpha')?.state, 'ACTIVE');
+  });
+
+  await test('releaseSlot cleans up active stream slot and frees key', () => {
+    const slot = slotGuard.getSlot('session_alpha');
+    assert.ok(slot);
+    const released = slotGuard.releaseSlot('session_alpha', slot.generation);
+    assert.strictEqual(released, true);
+    assert.strictEqual(slotGuard.getSlot('session_alpha'), undefined);
+  });
+
+  await test('releaseSlot blocks stale release from previous generation (monotonic barrier)', () => {
+    // Acquire fresh stream for session_beta (generation N)
+    const res1 = slotGuard.acquireSlot('session_beta');
+    assert.ok(res1.success);
+    const gen1 = res1.generation;
+    slotGuard.commitSlot('session_beta', gen1);
+    slotGuard.releaseSlot('session_beta', gen1);
+
+    // Acquire new stream for session_beta (generation N+1)
+    const res2 = slotGuard.acquireSlot('session_beta');
+    assert.ok(res2.success);
+    const gen2 = res2.generation;
+    assert.ok(gen2 > gen1);
+
+    // Stale delayed release from gen1 arrives: must NOT evict gen2!
+    const staleReleased = slotGuard.releaseSlot('session_beta', gen1);
+    assert.strictEqual(staleReleased, false);
+    assert.strictEqual(slotGuard.getSlot('session_beta')?.generation, gen2);
+
+    // Clean up
+    slotGuard.releaseSlot('session_beta', gen2);
+  });
+
+  await test('rollback: releasing pending slot allows immediate clean re-acquisition on handshake failure', () => {
+    const res = slotGuard.acquireSlot('session_gamma');
+    assert.ok(res.success);
+
+    // Simulated handshake failure before stream start:
+    slotGuard.releaseSlot('session_gamma', res.generation);
+    assert.strictEqual(slotGuard.getSlot('session_gamma'), undefined);
+
+    // Immediate re-try succeeds:
+    const retryRes = slotGuard.acquireSlot('session_gamma');
+    assert.strictEqual(retryRes.success, true);
+    slotGuard.releaseSlot('session_gamma', retryRes.generation);
+  });
+
+  await test('format409Response outputs spec-compliant HTTP 409 status and Retry-After header', () => {
+    const err = new StreamConflictError('session_delta', 42, 'ACTIVE', 3);
+    const resp = slotGuard.format409Response(err);
+
+    assert.strictEqual(resp.status, 409);
+    assert.strictEqual(resp.headers['Retry-After'], '3');
+    const parsedBody = JSON.parse(resp.body);
+    assert.strictEqual(parsedBody.jsonrpc, '2.0');
+    assert.strictEqual(parsedBody.error.code, -32000);
+    assert.ok(parsedBody.error.message.includes('Concurrent stream conflict'));
+    assert.strictEqual(parsedBody.error.data.retryAfter, 3);
   });
 
   // Summary
