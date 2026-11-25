@@ -1,4 +1,9 @@
 import {
+  ResilientSubprocessRunner,
+  SubprocessTimeoutError,
+  calculateAdaptiveLoadMultiplier
+} from '../pro_pack/resilient_subprocess_runner.ts';
+import {
   MetadataIntegrityGuard,
   MetadataIntegrityPinStore,
   MetadataIntegrityViolationError,
@@ -5421,6 +5426,108 @@ async function runProPackTestSuite() {
     const res = integrityGuard.verify('weather-server-1', updatedMeta);
     assert.strictEqual(res.verified, true);
     assert.strictEqual(res.isNewPin, false);
+  });
+
+
+  // =========================================================================
+  // Module: Resilient Subprocess Execution Guard & Load Runner (servers #5658)
+  // =========================================================================
+  console.log('\n[Module: Resilient Subprocess Execution Guard & Load Runner]');
+  const subRunner = new ResilientSubprocessRunner();
+
+  await test('calculateAdaptiveLoadMultiplier returns safe multiplier >= 1.0', () => {
+    const mult = calculateAdaptiveLoadMultiplier();
+    assert.ok(typeof mult === 'number' && mult >= 1.0);
+  });
+
+  await test('run executes fast node command and captures stdout cleanly', async () => {
+    const res = await subRunner.run('node', ['-e', 'console.log("mcp_subprocess_ready")']);
+    assert.strictEqual(res.exitCode, 0);
+    assert.strictEqual(res.wasKilled, false);
+    assert.ok(res.stdout.includes('mcp_subprocess_ready'));
+  });
+
+  await test('run writes to stdin and reads from stdout', async () => {
+    const res = await subRunner.run(
+      'node',
+      ['-e', 'process.stdin.on("data", d => process.stdout.write("ECHO:" + d))'],
+      { stdinData: 'hello_mcp' }
+    );
+    assert.strictEqual(res.exitCode, 0);
+    assert.ok(res.stdout.includes('ECHO:hello_mcp'));
+  });
+
+  await test('run isolates stderr diagnostic output cleanly without polluting stdout (resolves #5658)', async () => {
+    const res = await subRunner.run(
+      'node',
+      ['-e', 'console.error("DIAGNOSTIC_WARNING"); console.log("DATA_PAYLOAD")']
+    );
+    assert.strictEqual(res.exitCode, 0);
+    assert.ok(res.stdout.includes('DATA_PAYLOAD'));
+    assert.ok(res.stderr.includes('DIAGNOSTIC_WARNING'));
+    assert.strictEqual(res.stdout.includes('DIAGNOSTIC_WARNING'), false);
+  });
+
+  await test('run terminates silent hanging subprocess with INACTIVITY_TIMEOUT', async () => {
+    let thrownError: any = null;
+    try {
+      await subRunner.run(
+        'node',
+        ['-e', 'setInterval(() => {}, 1000)'], // hangs forever silently
+        { inactivityTimeoutMs: 300, maxWallClockTimeoutMs: 2000 }
+      );
+    } catch (err) {
+      thrownError = err;
+    }
+
+    assert.ok(thrownError instanceof SubprocessTimeoutError);
+    assert.strictEqual(thrownError.reason, 'INACTIVITY_TIMEOUT');
+  });
+
+  await test('run grants heartbeat extensions while subprocess actively emits progress (resolves #5658)', async () => {
+    const script = 'let c = 0; const iv = setInterval(() => { process.stdout.write("progress " + (++c) + "\\n"); if (c >= 3) { clearInterval(iv); } }, 100);';
+    const res = await subRunner.run('node', ['-e', script], {
+      loadFactor: 1.0,
+      inactivityTimeoutMs: 250,
+      maxWallClockTimeoutMs: 3000
+    });
+
+    assert.strictEqual(res.exitCode, 0);
+    assert.strictEqual(res.wasKilled, false);
+    assert.ok(res.activityExtensionsGranted >= 2, 'Must grant activity extensions for active stdout progress');
+    assert.ok(res.stdout.includes('progress 3'));
+  });
+
+  await test('run terminates long-running process when exceeding hard ceiling', async () => {
+    let thrownError: any = null;
+    const script = 'setInterval(() => { process.stdout.write("heartbeat\\n"); }, 50);';
+    try {
+      await subRunner.run('node', ['-e', script], {
+        loadFactor: 1.0,
+        inactivityTimeoutMs: 1000,
+        maxWallClockTimeoutMs: 200
+      });
+    } catch (err) {
+      thrownError = err;
+    }
+
+    assert.ok(thrownError instanceof SubprocessTimeoutError);
+    assert.strictEqual(thrownError.reason, 'HARD_CEILING_TIMEOUT');
+  });
+
+  await test('executeWithFallback transparently uses fallback extractor when primary fails or times out', async () => {
+    const outcome = await subRunner.executeWithFallback(
+      async () => {
+        throw new Error('Primary Readability engine killed under extreme CPU load');
+      },
+      (err) => {
+        return { text: 'fallback_extracted_content', errorReason: err.message };
+      }
+    );
+
+    assert.strictEqual(outcome.usedFallback, true);
+    assert.strictEqual(outcome.result.text, 'fallback_extracted_content');
+    assert.ok(outcome.error?.message.includes('Readability engine killed'));
   });
 
   // Summary
