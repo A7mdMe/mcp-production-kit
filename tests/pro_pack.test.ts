@@ -254,6 +254,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { EventEmitter } from 'node:events';
+import { DomainScalarSerializationGuard } from '../pro_pack/domain_scalar_serialization_guard.ts';
 
 let passed = 0;
 let failed = 0;
@@ -5628,6 +5629,121 @@ async function runProPackTestSuite() {
     assert.strictEqual(parsedBody.error.code, -32000);
     assert.ok(parsedBody.error.message.includes('Concurrent stream conflict'));
     assert.strictEqual(parsedBody.error.data.retryAfter, 3);
+  });
+
+
+  console.log('\n[Module: Domain Scalar Serialization Guard & Schema Envelope Adapter]');
+
+  await test('normalizeScalar losslessly converts URL objects to string URIs preventing {} data loss (resolves python-sdk #3886)', () => {
+    const rawUrl = new URL('https://api.example.com/v1/tools?filter=active#section');
+    const { normalized, type } = DomainScalarSerializationGuard.normalizeScalar(rawUrl);
+
+    assert.strictEqual(type, 'url');
+    assert.strictEqual(normalized, 'https://api.example.com/v1/tools?filter=active#section');
+
+    // Also handles URL-like duck-typed object
+    const duckUrl = { href: 'https://mcp.dev/spec', origin: 'https://mcp.dev' };
+    const duckRes = DomainScalarSerializationGuard.normalizeScalar(duckUrl);
+    assert.strictEqual(duckRes.type, 'url');
+    assert.strictEqual(duckRes.normalized, 'https://mcp.dev/spec');
+  });
+
+  await test('normalizeScalar normalizes Date objects to ISO 8601 strings and UUIDs to canonical format', () => {
+    const testDate = new Date('2026-11-26T18:00:00.000Z');
+    const dateRes = DomainScalarSerializationGuard.normalizeScalar(testDate);
+    assert.strictEqual(dateRes.type, 'datetime');
+    assert.strictEqual(dateRes.normalized, '2026-11-26T18:00:00.000Z');
+
+    const uuidUpper = '123E4567-E89B-12D3-A456-426614174000';
+    const uuidRes = DomainScalarSerializationGuard.normalizeScalar(uuidUpper);
+    assert.strictEqual(uuidRes.type, 'uuid');
+    assert.strictEqual(uuidRes.normalized, '123e4567-e89b-12d3-a456-426614174000');
+  });
+
+  await test('normalizeScalar preserves BigInt and Decimal precision without IEEE-754 float truncation', () => {
+    const bigIntVal = 9007199254740993n; // Greater than Number.MAX_SAFE_INTEGER
+    const bigRes = DomainScalarSerializationGuard.normalizeScalar(bigIntVal);
+    assert.strictEqual(bigRes.type, 'bigint');
+    assert.strictEqual(bigRes.normalized, '9007199254740993');
+
+    // Decimal-like object with toFixed
+    const decimalObj = {
+      toFixed: () => '123456789.987654321',
+      isNaN: () => false
+    };
+    const decRes = DomainScalarSerializationGuard.normalizeScalar(decimalObj);
+    assert.strictEqual(decRes.type, 'decimal');
+    assert.strictEqual(decRes.normalized, '123456789.987654321');
+  });
+
+  await test('deepNormalize recursively visits objects, arrays, Sets, and Maps eliminating empty object collapses', () => {
+    const complexPayload = {
+      title: 'Resource Directory',
+      links: new Set([new URL('https://auth.mcp.run'), new URL('https://docs.mcp.run')]),
+      metadata: new Map([
+        ['createdAt', new Date('2026-01-01T00:00:00.000Z')],
+        ['transactionId', '550e8400-e29b-41d4-a716-446655440000']
+      ]),
+      activeFlags: [true, false]
+    };
+
+    const sanitized = DomainScalarSerializationGuard.deepNormalize<any>(complexPayload);
+
+    assert.strictEqual(sanitized.title, 'Resource Directory');
+    assert.ok(Array.isArray(sanitized.links));
+    assert.strictEqual(sanitized.links.length, 2);
+    assert.strictEqual(sanitized.links[0], 'https://auth.mcp.run/');
+    assert.strictEqual(sanitized.links[1], 'https://docs.mcp.run/');
+    assert.strictEqual(sanitized.metadata.createdAt, '2026-01-01T00:00:00.000Z');
+    assert.strictEqual(sanitized.metadata.transactionId, '550e8400-e29b-41d4-a716-446655440000');
+  });
+
+  await test('wrapStructuredOutput wraps bare scalars in canonical object envelope with required: [result] schema', () => {
+    const rawUrl = new URL('https://example.com/item/42');
+    const { structuredContent, schema } = DomainScalarSerializationGuard.wrapStructuredOutput(rawUrl);
+
+    assert.strictEqual((structuredContent as any).result, 'https://example.com/item/42');
+    assert.strictEqual((structuredContent as any).scalarType, 'url');
+    assert.strictEqual((schema as any).type, 'object');
+    assert.deepStrictEqual((schema as any).required, ['result']);
+    assert.strictEqual((schema as any).properties.result.format, 'uri');
+  });
+
+  await test('generateScalarSchema emits correct json format (uri, date-time, uuid) for domain scalars', () => {
+    const urlSchema = DomainScalarSerializationGuard.generateScalarSchema('url', 'https://mcp.run');
+    assert.strictEqual(urlSchema.properties.result.format, 'uri');
+
+    const dtSchema = DomainScalarSerializationGuard.generateScalarSchema('datetime', '2026-11-26T00:00:00Z');
+    assert.strictEqual(dtSchema.properties.result.format, 'date-time');
+
+    const uuidSchema = DomainScalarSerializationGuard.generateScalarSchema('uuid', '550e8400-e29b-41d4-a716-446655440000');
+    assert.strictEqual(uuidSchema.properties.result.format, 'uuid');
+  });
+
+  await test('createScalarResilientTool executes handler and produces spec-compliant content and structuredContent', async () => {
+    const toolHandler = DomainScalarSerializationGuard.createScalarResilientTool(async (args: { id: string }) => {
+      return new URL(`https://service.local/assets/${args.id}`);
+    });
+
+    const res = await toolHandler({ id: 'doc-99' });
+    assert.strictEqual(res.content[0].type, 'text');
+    assert.strictEqual(res.content[0].text, 'https://service.local/assets/doc-99');
+    assert.strictEqual(res.structuredContent.result, 'https://service.local/assets/doc-99');
+    assert.strictEqual(res.structuredContent.scalarType, 'url');
+    assert.strictEqual((res.schema as any).properties.result.format, 'uri');
+  });
+
+  await test('deepNormalize sanitizes nested Error objects into readable error structures instead of {}', () => {
+    const payloadWithError = {
+      status: 'failed',
+      error: new Error('Database connection reset by peer')
+    };
+
+    const sanitized = DomainScalarSerializationGuard.deepNormalize<any>(payloadWithError);
+    assert.strictEqual(sanitized.status, 'failed');
+    assert.strictEqual(sanitized.error.name, 'Error');
+    assert.strictEqual(sanitized.error.message, 'Database connection reset by peer');
+    assert.ok(sanitized.error.stack.includes('Database connection reset'));
   });
 
   // Summary
