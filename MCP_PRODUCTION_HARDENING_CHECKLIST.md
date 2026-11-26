@@ -163,7 +163,7 @@ Whether you are building MCP servers in TypeScript, Python, or Go for Claude Des
 
 ## Need Drop-In, Production-Ready Solutions?
 
-Every single vulnerability, edge case, and architectural invariant listed in this checklist is implemented and verified with **362 automated unit tests** in the **[MCP Production Kit](https://github.com/A7mdMe/mcp-production-kit)**:
+Every single vulnerability, edge case, and architectural invariant listed in this checklist is implemented and verified with **402 automated unit tests** in the **[MCP Production Kit](https://github.com/A7mdMe/mcp-production-kit)**:
 
 - **Free Open-Source Core**: Production-ready TypeScript starter kit with dual stdio/SSE transports, SSRF protection, clean stdio logging, and namespaced memory store.
 - **Commercial Pro Pack**: 33 drop-in modular TypeScript guards covering PostgreSQL/SQLite security, rate limiters, OAuth revocation, atomic symlinks, stream priming, and knowledge graph invariants.
@@ -193,3 +193,8 @@ Every single vulnerability, edge case, and architectural invariant listed in thi
   - *Risk:* In Streamable HTTP transports, asynchronous registration of SSE stream slots allows concurrent GET requests to bypass the 409 Conflict check, spawning duplicate streams and corrupting agent events.
   - *Hardening:* Enforce zero-yield synchronous atomic slot reservation (Claim-Commit-Release) with monotonic generation barriers and standard HTTP 409 Retry-After responses.
   - *Reference:* `stream_slot_reservation_guard.ts` (Pro Pack Module 43).
+
+- [x] **Item 14: Domain Scalar Normalization & Lossless Tool Return Encoding (python-sdk #3886)**
+  - *Risk:* Tool return annotations for `AnyUrl` / `AnyHttpUrl` or URL objects get stripped of private constraints by standard serializers, generating empty schemas and silently returning `{}` data to the LLM. Domain scalars like `UUID`, `datetime`, `Decimal`, and `Path` drop structured output or raise `InvalidSignature`.
+  - *Hardening:* Enforce lossless domain scalar normalization, canonical `{ result: <value> }` envelope wrapping with explicit format schemas (`uri`, `date-time`, `uuid`), and recursive sanitization of nested Sets, Maps, and Errors.
+  - *Reference:* `domain_scalar_serialization_guard.ts` (Pro Pack Module 44).
