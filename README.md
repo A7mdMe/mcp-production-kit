@@ -13,7 +13,7 @@
 
 
 > 🛡️ **Looking for production security best practices?**  
-> Check out the **[Production MCP Server Hardening & Security Checklist](MCP_PRODUCTION_HARDENING_CHECKLIST.md)** covering 33 architectural vulnerabilities, protocol edge cases, and reliability failure modes discovered in production MCP deployments.
+> Check out the **[Production MCP Server Hardening & Security Checklist](MCP_PRODUCTION_HARDENING_CHECKLIST.md)** covering 44 architectural vulnerabilities, protocol edge cases, and reliability failure modes discovered in production MCP deployments.
 
 ## Free Core vs. Pro Pack Comparison
 
@@ -38,6 +38,7 @@
 | **Stdio Lifecycle & Epoch Fence** | - | **Monotonic epoch fence, eliminates Connection closed races & reaps orphans** |
 | **Client Session Invariants** | - | **Fail-closed discovery on closed client, prevents hallucinated empty tools** |
 | **Subscription Router Guard** | - | **Zero-slot graceful completion for unadvertised filters, prevents DoS** |
+| **Domain Scalar Serialization Guard** | - | **Lossless URL normalization, canonical object envelopes & format schemas (#3886)** |
 | **Stream Slot Reservation Guard** | - | **Synchronous atomic slot reservation, two-phase stream states & TOCTOU 409 defense (#3891)** |
 | **Resilient Subprocess Execution Guard** | - | **Progress-aware heartbeat timeouts, load scaling & graceful fallback extractors (#5658)** |
 | **Metadata Integrity Pinning Guard** | - | **Trust-On-First-Use (TOFU) cryptographic fingerprinting & prompt-injection defense (#3907)** |
