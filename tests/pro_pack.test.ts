@@ -255,6 +255,11 @@ import path from 'node:path';
 import { Readable } from 'node:stream';
 import { EventEmitter } from 'node:events';
 import { DomainScalarSerializationGuard } from '../pro_pack/domain_scalar_serialization_guard.ts';
+import {
+  ResilientOAuthRefreshGuard,
+  TransientOAuthRefreshError,
+  TerminalOAuthRefreshError
+} from '../pro_pack/oauth_resilient_refresh_guard.ts';
 
 let passed = 0;
 let failed = 0;
@@ -5744,6 +5749,189 @@ async function runProPackTestSuite() {
     assert.strictEqual(sanitized.error.name, 'Error');
     assert.strictEqual(sanitized.error.message, 'Database connection reset by peer');
     assert.ok(sanitized.error.stack.includes('Database connection reset'));
+  });
+
+
+  console.log('\n[Module: Resilient OAuth Refresh & Transient Failure Guard]');
+
+  await test('isTransientFailure correctly classifies HTTP 500, 502, 503, 504, 429 and temporarily_unavailable as transient', () => {
+    assert.strictEqual(ResilientOAuthRefreshGuard.isTransientFailure(503), true);
+    assert.strictEqual(ResilientOAuthRefreshGuard.isTransientFailure(502), true);
+    assert.strictEqual(ResilientOAuthRefreshGuard.isTransientFailure(500), true);
+    assert.strictEqual(ResilientOAuthRefreshGuard.isTransientFailure(429), true);
+    assert.strictEqual(ResilientOAuthRefreshGuard.isTransientFailure(400, 'temporarily_unavailable'), true);
+    assert.strictEqual(ResilientOAuthRefreshGuard.isTransientFailure(400, 'server_error'), true);
+    assert.strictEqual(ResilientOAuthRefreshGuard.isTransientFailure(400, 'invalid_grant'), false);
+    assert.strictEqual(ResilientOAuthRefreshGuard.isTransientFailure(200), false);
+  });
+
+  await test('isTerminalFailure correctly identifies invalid_grant and invalid_client as terminal non-retriable errors', () => {
+    assert.strictEqual(ResilientOAuthRefreshGuard.isTerminalFailure('invalid_grant'), true);
+    assert.strictEqual(ResilientOAuthRefreshGuard.isTerminalFailure('invalid_client'), true);
+    assert.strictEqual(ResilientOAuthRefreshGuard.isTerminalFailure('unauthorized_client'), true);
+    assert.strictEqual(ResilientOAuthRefreshGuard.isTerminalFailure('temporarily_unavailable'), false);
+    assert.strictEqual(ResilientOAuthRefreshGuard.isTerminalFailure('server_error'), false);
+  });
+
+  await test('parseRetryAfterHeader accurately extracts numeric seconds and HTTP-date header formats', () => {
+    assert.strictEqual(ResilientOAuthRefreshGuard.parseRetryAfterHeader('15'), 15000);
+    assert.strictEqual(ResilientOAuthRefreshGuard.parseRetryAfterHeader('0'), 0);
+    assert.strictEqual(ResilientOAuthRefreshGuard.parseRetryAfterHeader(null), null);
+    assert.strictEqual(ResilientOAuthRefreshGuard.parseRetryAfterHeader(''), null);
+
+    const futureDate = new Date(Date.now() + 5000).toUTCString();
+    const parsedMs = ResilientOAuthRefreshGuard.parseRetryAfterHeader(futureDate);
+    assert.ok(typeof parsedMs === 'number' && parsedMs > 0 && parsedMs <= 6000);
+  });
+
+  await test('executeRefreshWithResilience coalesces concurrent refresh calls into single in-flight promise (resolves #1760, #2915)', async () => {
+    const guard = new ResilientOAuthRefreshGuard({ initialBackoffMs: 10, maxRetries: 2 });
+    let fetchCalls = 0;
+
+    const mockFetch = async () => {
+      fetchCalls++;
+      await new Promise(r => setTimeout(r, 25));
+      return new Response(JSON.stringify({ access_token: 'new_token_xyz', expires_in: 3600 }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    };
+
+    // Trigger 3 concurrent refreshes simultaneously
+    const [res1, res2, res3] = await Promise.all([
+      guard.executeRefreshWithResilience(mockFetch),
+      guard.executeRefreshWithResilience(mockFetch),
+      guard.executeRefreshWithResilience(mockFetch)
+    ]);
+
+    assert.strictEqual(fetchCalls, 1); // Exactly 1 network fetch executed
+    assert.strictEqual(res1.status, 200);
+    assert.strictEqual(res2.status, 200);
+    assert.strictEqual(res3.status, 200);
+
+    const data1 = await res1.json();
+    assert.strictEqual(data1.access_token, 'new_token_xyz');
+  });
+
+  await test('executeRefreshWithResilience retries on transient 503 and succeeds without falling through to new auth (resolves #3238)', async () => {
+    let attempts = 0;
+    const transientErrorsCaught: string[] = [];
+
+    const guard = new ResilientOAuthRefreshGuard({
+      maxRetries: 3,
+      initialBackoffMs: 10,
+      onTransientError: (err) => transientErrorsCaught.push(err.message)
+    });
+
+    const mockFetch = async () => {
+      attempts++;
+      if (attempts < 3) {
+        return new Response(JSON.stringify({ error: 'server_error', error_description: 'Transient database hiccup' }), {
+          status: 503,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      return new Response(JSON.stringify({ access_token: 'recovered_token_abc' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    };
+
+    const res = await guard.executeRefreshWithResilience(mockFetch);
+    assert.strictEqual(attempts, 3);
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(transientErrorsCaught.length, 2);
+
+    const body = await res.json();
+    assert.strictEqual(body.access_token, 'recovered_token_abc');
+  });
+
+  await test('executeRefreshWithResilience immediately halts without retry on terminal invalid_grant', async () => {
+    let attempts = 0;
+    let terminalErrorCaught = false;
+
+    const guard = new ResilientOAuthRefreshGuard({
+      maxRetries: 3,
+      initialBackoffMs: 10,
+      onTerminalError: () => { terminalErrorCaught = true; }
+    });
+
+    const mockFetch = async () => {
+      attempts++;
+      return new Response(JSON.stringify({ error: 'invalid_grant', error_description: 'Refresh token revoked' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    };
+
+    const res = await guard.executeRefreshWithResilience(mockFetch);
+    assert.strictEqual(attempts, 1); // No retries for terminal error
+    assert.strictEqual(res.status, 400);
+    assert.strictEqual(terminalErrorCaught, true);
+
+    const body = await res.json();
+    assert.strictEqual(body.error, 'invalid_grant');
+  });
+
+  await test('executeRefreshWithResilience raises TransientOAuthRefreshError when retries exhaust without destroying token', async () => {
+    let attempts = 0;
+    const guard = new ResilientOAuthRefreshGuard({
+      maxRetries: 2,
+      initialBackoffMs: 10
+    });
+
+    const mockFetch = async () => {
+      attempts++;
+      return new Response(JSON.stringify({ error: 'temporarily_unavailable' }), {
+        status: 503,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    };
+
+    let caughtError: any = null;
+    try {
+      await guard.executeRefreshWithResilience(mockFetch);
+    } catch (e) {
+      caughtError = e;
+    }
+
+    assert.ok(caughtError instanceof TransientOAuthRefreshError);
+    assert.strictEqual(caughtError.isTransient, true);
+    assert.strictEqual(caughtError.lastStatusCode, 503);
+    assert.strictEqual(attempts, 3); // Initial attempt + 2 retries
+  });
+
+  await test('createCustomFetch intercepts only refresh_token grant requests while letting normal API calls pass transparently', async () => {
+    const guard = new ResilientOAuthRefreshGuard({ initialBackoffMs: 10, maxRetries: 1 });
+    let refreshIntercepted = false;
+    let normalPassed = false;
+
+    const baseFetch = async (input: any, init?: any) => {
+      const body = String(init?.body || '');
+      if (body.includes('grant_type=refresh_token')) {
+        refreshIntercepted = true;
+        return new Response('{"access_token": "ok"}', { status: 200 });
+      }
+      normalPassed = true;
+      return new Response('{"data": 123}', { status: 200 });
+    };
+
+    const customFetch = guard.createCustomFetch(baseFetch as any);
+
+    // 1. Normal tool execution request
+    const r1 = await customFetch('https://api.mcp.internal/tools/call', {
+      method: 'POST',
+      body: JSON.stringify({ method: 'tools/call' })
+    });
+    assert.strictEqual(normalPassed, true);
+    assert.strictEqual(refreshIntercepted, false);
+
+    // 2. Refresh token grant request
+    const r2 = await customFetch('https://auth.mcp.internal/oauth/token', {
+      method: 'POST',
+      body: 'grant_type=refresh_token&refresh_token=rt_123'
+    });
+    assert.strictEqual(refreshIntercepted, true);
   });
 
   // Summary
