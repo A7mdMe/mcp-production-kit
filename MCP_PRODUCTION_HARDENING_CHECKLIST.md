@@ -163,7 +163,7 @@ Whether you are building MCP servers in TypeScript, Python, or Go for Claude Des
 
 ## Need Drop-In, Production-Ready Solutions?
 
-Every single vulnerability, edge case, and architectural invariant listed in this checklist is implemented and verified with **402 automated unit tests** in the **[MCP Production Kit](https://github.com/A7mdMe/mcp-production-kit)**:
+Every single vulnerability, edge case, and architectural invariant listed in this checklist is implemented and verified with **410 automated unit tests** in the **[MCP Production Kit](https://github.com/A7mdMe/mcp-production-kit)**:
 
 - **Free Open-Source Core**: Production-ready TypeScript starter kit with dual stdio/SSE transports, SSRF protection, clean stdio logging, and namespaced memory store.
 - **Commercial Pro Pack**: 33 drop-in modular TypeScript guards covering PostgreSQL/SQLite security, rate limiters, OAuth revocation, atomic symlinks, stream priming, and knowledge graph invariants.
@@ -198,3 +198,7 @@ Every single vulnerability, edge case, and architectural invariant listed in thi
   - *Risk:* Tool return annotations for `AnyUrl` / `AnyHttpUrl` or URL objects get stripped of private constraints by standard serializers, generating empty schemas and silently returning `{}` data to the LLM. Domain scalars like `UUID`, `datetime`, `Decimal`, and `Path` drop structured output or raise `InvalidSignature`.
   - *Hardening:* Enforce lossless domain scalar normalization, canonical `{ result: <value> }` envelope wrapping with explicit format schemas (`uri`, `date-time`, `uuid`), and recursive sanitization of nested Sets, Maps, and Errors.
   - *Reference:* `domain_scalar_serialization_guard.ts` (Pro Pack Module 44).
+- [x] **Item 15: Resilient OAuth Token Refresh & Transient Error Discrimination (typescript-sdk #3238, #1760, #2915)**
+  - *Risk:* Transient network blips or 5xx/429 errors from authorization servers cause standard MCP client `auth()` to fall through to `redirectToAuthorization()`, crashing headless agents with `UnauthorizedError` and discarding valid refresh tokens. Concurrent tool calls trigger duplicate refreshes that violate token rotation policies.
+  - *Hardening:* Enforce error discrimination separating terminal rejections (`invalid_grant`) from transient blips, coalesce concurrent refreshes via single-flight deduplication, and retry with jittered exponential backoff and `Retry-After` handling without destroying stored credentials.
+  - *Reference:* `oauth_resilient_refresh_guard.ts` (Pro Pack Module 45).
